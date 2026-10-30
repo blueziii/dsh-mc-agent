@@ -243,6 +243,17 @@ section('④ profileFor：每一类一套权重，用户配置优先')
   ok(flat.cost.maxDropDown === 3 && flat.cost.digCost === 4 && flat.cost.placeCost === 12 && flat.cost.liquidCost === 4,
     'flat = 改动前那套全局值（3/4/4/12）', JSON.stringify(flat.cost))
   ok(flat.cost.allowParkour === false, 'flat：跳远默认关')
+/* 🔴 2026-10-30 用户：「智能规划路线，不要兜底」—— 以前 8 档全关，柱林/断崖之间
+ *   A* 必然 NoPath（只能靠兜底一格一格试）。现在只给"本来就过不去"的三档开：
+ *   跑酷边要求落点实心 + 上方两格净空（vendor `getMoveParkourForward` 自己查），
+ *   再加 `parkourPenalty`（默认 4）⇒ 只有"省下的路 > 4 步"时才选。 */
+for (const kind of ['drops', 'gap', 'narrow']) {
+  ok(profileFor(kind, {}).cost.allowParkour === true, `${kind}：开跑酷（跨 1~2 格空隙 = 真能过）`, String(profileFor(kind, {}).cost.allowParkour))
+}
+for (const kind of ['flat', 'steps', 'hazard', 'unknown']) {
+  ok(profileFor(kind, {}).cost.allowParkour === false, `${kind}：仍然关（平地跳没意义 / 台阶、危险地形摔不起）`, String(profileFor(kind, {}).cost.allowParkour))
+}
+ok(profileFor('gap', { walkAllowParkour: false }).cost.allowParkour === false, '用户显式 walkAllowParkour:false ⇒ 听用户的（档案盖不过）')
   ok(flat.over.length === 0, '没配 cfg ⇒ 没有任何覆盖')
   ok(profileFor('flat').cost.maxDropDown === TERRAIN_PROFILES.flat.maxDropDown, 'cost 跟 TERRAIN_PROFILES 一致')
 

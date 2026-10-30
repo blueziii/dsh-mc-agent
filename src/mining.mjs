@@ -114,8 +114,9 @@ export function veinHint (b, minedName) {
  *   不挖脚下的那格」）。现在改按摔落伤害算：伤害 = 落差 − UNDERFOOT_SAFE_DROP（MC 公式）。
  *   常量保留导出（`UNDERFOOT_DROP_MAX` 现在只用于文案分级，套件也还 import 它）。 */
 export const UNDERFOOT_DROP_MAX = 4
-export const UNDERFOOT_DROP_MAX_LOW_HP = 3
-export const UNDERFOOT_DROP_MIN_HP = 10
+/* 🔴 2026-11-02 审计（#19）：这里原来还有 `UNDERFOOT_DROP_MAX_LOW_HP = 3` 和
+ *   `UNDERFOOT_DROP_MIN_HP = 10` —— **全仓一次都没读过**（血少那套阈值 2026-10-29 就已经
+ *   换成"按摔落伤害算"）：留着只会让人以为"血少时上限是 3"。已删。 */
 export const UNDERFOOT_SAFE_DROP = 3
 
 export function underfootRiskOf (b, pos) {
@@ -393,7 +394,9 @@ export async function breakBlock (self, { x, y, z, allowDangerous = false, noCle
  * 只挖 2 格（y-1、y）会让头卡在 y+1 上 —— 这正好是"最容易卡死的形状"。
  */
 export const STAIR_MAX_STEPS = 64
-export const STAIR_STEP_MS = 3_000
+/* 🔴 2026-11-02 审计（#19）：`STAIR_STEP_MS = 3000`（"每走一格最多 3 秒"）**全仓没读过** ——
+ *   实际每步预算走的是下面的 `STAIR_WALK_MS`（1500ms）。套件还钉着 `=== 3000`，
+ *   于是"断言绿着、行为早就不看它了"。已删。 */
 
 /* 🔴 2026-10-27 实机（两个会话 115 次 `mode:"stair"` 调用，57 次报"卡住"= 50%，用户：「一半是失败的」）：
  *   其中 **41 次耗时 ≥9.5 秒** —— 每步平均 1.72 秒，10 秒预算只够 6 步，最后那一步必然越过预算边界：
@@ -505,7 +508,7 @@ export async function digStair (self, {
      *   往上挖时只清了**前方**那 3 格，漏了"我自己得跳上去"这件事 —— 跳跃需要
      *   **自己站位上方 2 格净空**（脚从 y 抬到 y+1.25、头顶到 y+3）。从水平隧道往上挖时，
      *   自己头顶往往还是原岩 ⇒ 起跳就被顶回来，pathfinder 报 NoPath，而这一趟是
-     *   `noDig:true`（不许它自己挖）⇒ 一步就判 stuck，用户看到的就是"挖两格就卡住"。
+     *   `allowDig:false`（不许它自己挖）⇒ 一步就判 stuck，用户看到的就是"挖两格就卡住"。
      *   现在往上时先把头顶那 2 格清开；往下不用清（往下是掉/走下去，不跳）。 */
     if (up) {
       for (const hy of [cur.y + 1, cur.y + 2]) {
@@ -554,7 +557,7 @@ export async function digStair (self, {
       /* 🔴 2026-10-28 参数审计：这里原来写 `budgetMs:` —— `walkTo` 只认 `budget`，
        *    多出来的键被静默丢掉，于是每步走路都用上了 `cfg.moveBudgetMs` 兜底值（40 秒），
        *    一步就把整个 dig 调用的时间吃光，回来只会报"时间到/卡住"。 */
-      w = await self.walkTo({ x: fx, y: standY, z: fz }, { noDig: true, budget: stepBudget, intent: 'stand' })
+      w = await self.walkTo({ x: fx, y: standY, z: fz }, { allowDig: false, budget: stepBudget, intent: 'stand' })
     } catch (e) {
       notes.push(`⚠ 走过去失败：${e?.message ?? e}`)
     }
@@ -568,7 +571,7 @@ export async function digStair (self, {
        *   ② 刚清开的头顶方块可能还没同步到本地世界，第一次跳当然被顶回来。
        * 以前这里一次失败直接 `stuck` + break —— 用户看到的就是"卡住"。 */
       try {
-        const w2 = await self.walkTo({ x: fx, y: standY, z: fz }, { noDig: true, budget: stepBudget, intent: 'stand' })
+        const w2 = await self.walkTo({ x: fx, y: standY, z: fz }, { allowDig: false, budget: stepBudget, intent: 'stand' })
         now = b.entity.position.floored()
         ok = w2?.arrived || (now.x === fx && now.z === fz && Math.abs(now.y - standY) <= 1)
       } catch (e) { notes.push(`⚠ 再走一次也没成：${e?.message ?? e}`) }
@@ -636,12 +639,11 @@ export async function digStair (self, {
 export async function dig (self, {
   name = null, pos = null, maxDistance = 6, count = 1, allowDangerous = false, noClear = false,
   /* 2026-10-23 用户实机（「挖矿老是乱挖 / 够得到还搭方块」）：
-   *   noDig：走过去这一路允不允许挖穿挡路的方块。默认 true（只绕路、不挖墙）——
+   *   allowDig：走过去这一路允不允许挖穿挡路的方块。默认 false（只绕路、不挖墙）——
    *     以前是 false，为了够到墙后的矿，pathfinder 会顺手把一路石头泥土全挖了，
-   *     在用户眼里就是"乱挖"。确实要挖穿（矿在墙后）就显式 noDig:false 再叫一次。
-   *   towerFallback：走不通时允不允许"垫一格方块往上"。默认 false —— 以前这个兜底
-   *     无视 noTower 一律会跑，于是"明明够得到"也会原地搭柱子。 */
-  noDig = true, towerFallback = false,
+   *     在用户眼里就是"乱挖"。确实要挖穿（矿在墙后）就用 `allowDig:true` 再叫一次。
+   */
+  allowDig = false,
   mode = 'block', dir = null, targetY = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,
 } = {}, ctx = {}) {
   /* 2026-10-25 用户：「下矿时 AI 更倾向直上直下，而不选择挖阶梯」⇒ stair 模式。 */
@@ -916,20 +918,15 @@ export async function dig (self, {
          *   挖东西只要站到 **reach 以内** 就行，不需要贴到 2.2 格 —— 固定 2.2 会让“能走到 3~4 格内”
          *   也判成“没走到”。改成跟着 reach 走（留 1 格余量）。 */
         const arrive = Math.max(1.2, reachMax - 1)
-        const w = await self.walkTo(stand, { arrive, budget, noDig, towerFallback })
+        const w = await self.walkTo(stand, { arrive, budget, allowDig })
         /* 🔴 2026-10-25 用户：「dig 如果没办法到那格应该自动切换成可破坏」——
          *   默认不挖（只绕路）走不过去时，**自动**改成允许挖穿挡路的方块再走一次。
          *   只在真的还够不着时重试，并且只用本轮剩下的时间（不把整轮吃光）。 */
-        if (noDig && fresh && fresh.name === nm && blockReachOf(b, fresh) > reachMax) {
-          const rest = self.callLeft()
-          if (rest > 1200) {
-            const w2 = await self.walkTo(stand, { arrive, budget: Math.min(budget, rest), noDig: false, towerFallback })
-            fresh = b.blockAt(p)
-            if (w2?.arrived === true || (fresh && fresh.name === nm && blockReachOf(b, fresh) <= reachMax)) {
-              out.push(`绕不过去（${w?.reason ?? '路被方块挡着'}）—— 已改成**挖穿挡路的方块**走过去`)
-            }
-          }
-        }
+        /* 🔴 2026-11-02 审计：这里以前**偷偷**把 `allowDig` 翻成 true 再走一遍 ——
+         *   上层明确关掉的开关被代码自己打开（和刚删掉的「自动垫柱」同型），
+         *   第一次"为什么走不过去"被第二遍结果盖掉，还吃掉整轮剩下的预算。
+         *   现在不重试：走不过去就照下面那条「够不着」如实报（含"没挖墙 + 要挖就带 digThrough"）。
+         */
         fresh = b.blockAt(p)
         /* 🔴 2026-10-15 审计：`b.blockAt(p)` 在**区块卸载**时返回 null，而以前 `!fresh` 和
          *    `fresh.name !== nm` 走同一条路 ⇒ 把"读不到"当成"走过去顺手挖掉了"，`okCount++`
@@ -969,7 +966,9 @@ export async function dig (self, {
           out.push(`够不着 ${nm} @ ${p}（眼睛到方块中心 ${away.toFixed(1)} 格，`
             + `${w?.arrived ? '走过去也只到这么远' : `走过去也没走到：${w?.reason ?? '没走到'}`}；${rel}）—— `
             + '先 `mc_move` 到它旁边（或换个近一点的目标）再叫我挖：站远了挖服务端不认，方块会"复原"。'
-            + (noDig ? '（已经试过挖穿挡路的方块，还是到不了）' : ''))
+            + (allowDig !== true
+              ? '（这趟是"不挖"模式 —— **我没有挖墙**；挡路的方块确实要挖开才过得去，就再叫一次 `mc_dig {digThrough:true}`）'
+              : ''))
           continue
         }
       }
@@ -1194,11 +1193,15 @@ const LOS_ENDS = Object.freeze([
  *   任意一条采样线**没有**撞到实心方块 ⇒ 看得见，返回 `null`；
  *   7 条全被挡 ⇒ 返回第一条撞到的 `{ blocker, at }`。
  *
- * 跳过：目标自己那格、贴身 ≤1 格的方块（射线第一块常常是自己踩的地板，与 ① 同口径）。
+ * 跳过：目标自己那格、**眼睛/脚自己站着的那两格**（射线第一格常常就是这两格）。
+ *   ⚠️ 只跳这两格，不跳"贴身 3×3×3" —— 那样隔着一格厚的墙也会被当成看得见。
  * 读不到方块（区块没加载）⇒ 这一条不算被挡（判不了就别拒绝干活，与 ④ 同口径）。
  */
 export function losBlockerAlong (b, from, gx, gy, gz, near) {
   const at = (x, y, z) => { try { return b.blockAt(new Vec3(x, y, z)) } catch { return null } }
+  /* 自己站的两格：眼睛在的那格 + 脚在的那格（都用 eye/feet 自己的坐标算，别信 near 里的分量） */
+  const eyeX = Math.floor(from.x), eyeY = Math.floor(from.y), eyeZ = Math.floor(from.z)
+  const feetY = Number.isFinite(Number(near?.fy0)) ? Math.floor(Number(near.fy0)) : eyeY - 1
   let first = null
   for (const [ex, ey, ez] of LOS_ENDS) {
     const dx = gx + ex - from.x
@@ -1214,7 +1217,14 @@ export function losBlockerAlong (b, from, gx, gy, gz, near) {
       const by = Math.floor(from.y + dy * t)
       const bz = Math.floor(from.z + dz * t)
       if (bx === gx && by === gy && bz === gz) continue
-      if (Math.max(Math.abs(bx - near.fx0), Math.abs(by - near.fy0), Math.abs(bz - near.fz0)) <= 1) continue
+      /* 🔴 2026-11-02 审计（#6）：这里原来跳过**以眼睛为心的 3×3×3**（`<= 1`）—— 隔着一格厚的墙
+       *   （石头贴着玩家、后面就是矿）时，那面墙正落在被跳过的范围里 ⇒ 恒判"看得见"，
+       *   于是模型被告知能挖、实际服务端不给。只该跳过**自己站着的那两格**（脚下 + 眼睛所在格）：
+       *   射线从眼睛出发，第一格永远是它们自己，不跳会把自己判成挡路。 */
+      /* 竖直方向要连带最后一格：眼睛看**正下方**的方块时，射线必然穿过自己脚下那格
+       *   （它就是我此刻踩的立足点，2026-10-31 定的是"侧面优先、不许挖脚下"），
+       *   把它当挡路会逼我们先挖自己的立足点。水平方向仍然一格都不放过。 */
+      if (bx === eyeX && bz === eyeZ && (by === eyeY || by === feetY || by === feetY - 1)) continue
       const blk = at(bx, by, bz)
       if (!blk) continue                              // 读不到 ⇒ 这一条判不了，不算被挡
       if (blk.boundingBox !== 'block') continue
@@ -1341,6 +1351,16 @@ export async function clearSightTo (self, b, p, { reachMax = 4.5, ctx = {}, noCl
     }
     if (NO_CLEAR_BLOCK.test(blk.name)) return { ok: false, why: 'container', blocker: blk.name, at: cell }
     if (blockReachOf(b, blk) > reachMax) return { ok: false, why: 'far', blocker: blk.name, at: cell }
+    /* 🔴 2026-11-02 审计（#5）：上面那段注释写「挖自己脚下会先被 `underfootRiskOf` 拦下」，
+     *   但那函数全文只接在 `mc_dig` 主流程两处，**清障这条路根本没走它** ——
+     *   站在崖边清障时能把自己脚下那格挖掉，直接掉下去（下面要是岩浆就是死）。
+     *   这里补上同一道判据：挖完会塌/会掉进危险，就不挖这一格。 */
+    {
+      const foot = underfootRiskOf(b, cell)
+      if (foot && foot.bad === true) {
+        return { ok: false, why: foot.why ? `unsafe:${foot.why}` : 'unsafe', blocker: blk.name, at: cell }
+      }
+    }
     try {
       if (typeof ctx.waitGrounded === 'function') {
         await ctx.waitGrounded(b, Math.min(1_200, Math.max(0, self.callLeft() - 800)))

@@ -293,8 +293,11 @@ function repIn (file, oldText, newText, label) {
   const eol = txt.includes('\r\n') ? '\r\n' : '\n'
   const n = newText.split('\n').join(eol)
   if (txt.includes(n)) { console.log(`  = ${label}（已打过）`); return }
-  const o = oldText.split('\n').join(eol)
-  if (!txt.includes(o)) { console.error(`  ✗ ${label}：锚点找不到（vendor 版本变了？）`); missing++; return }
+  /* 2026-10-30：`oldText` 可以是**数组** —— 同一个补丁可能有多种"旧状态"
+   *（原始 upstream / 老版本补丁），任一命中即可。补丁被改写过之后重跑要认得出。 */
+  const olds = (Array.isArray(oldText) ? oldText : [oldText]).map((s) => s.split('\n').join(eol))
+  const o = olds.find((s) => txt.includes(s))
+  if (o == null) { console.error(`  ✗ ${label}：锚点找不到（vendor 版本变了？）`); missing++; return }
   if (!CHECK_ONLY) writeFileSync(file, txt.replace(o, n))
   changed++
   console.log(`  + ${label}`)
@@ -326,7 +329,7 @@ rep(
    * 长路上每跨一个区块就会来一次 chunk_loaded、脚下方块一变就 block_updated ——
    * 以前它们统统走 stop()（stateGoal 清空 + path_stop）⇒ goto 以 PathStopped 拒绝、
    * 人立刻站住，实机表现就是「脚踩实地杵着不动」。 */
-  const RESUMABLE_RESETS = new Set(['block_updated', 'chunk_loaded', 'movements_updated', 'goal_moved'])
+  const RESUMABLE_RESETS = new Set(['block_updated', 'chunk_loaded', 'movements_updated', 'goal_moved', 'goal_updated'])
 
   function resetPath (reason, clearStates = true) {
     lastResetReason = reason
@@ -494,20 +497,21 @@ repIn(
   'A* 不垫方块：jumpUp 脚下那格'
 )
 
-/* ── 2026-10-25：move 不许"挖脚下"直上直下（用户：下矿应该挖阶梯） ──────── */
+/* ── 2026-10-30：move「挖脚下 / 斜下挖」由"禁止"改成"加价" ─────────────
+ * 用户原话：「这个改成代价变高，不要禁止」。
+ * 2026-10-25 那版是 if (toBreak.length > 0) return（嫌 AI 下矿直上直下不挖阶梯），
+ * 代价是**所有实心柱/实心墙都再也下不去** —— 落差一超 maxDropDown 就只能报 NoPath。
+ * 现在：照常生成这条边，只把代价乘上 digDownFactor（默认 3），让阶梯继续赢。
+ * oldText 传数组：upstream 原文 / 上一版补丁 / 今天第一版补丁，三种旧状态都认。
+ */
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
-  `    const blockLand = this.getLandingBlock(node, { x: 0, z: 0 })
-    if (!blockLand) return
-
-    cost += this.safeOrBreak(block0, toBreak)
+  [
+    `    cost += this.safeOrBreak(block0, toBreak)
     if (cost > 100) return
 
     if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater`,
-  `    const blockLand = this.getLandingBlock(node, { x: 0, z: 0 })
-    if (!blockLand) return
-
-    cost += this.safeOrBreak(block0, toBreak)
+    `    cost += this.safeOrBreak(block0, toBreak)
     if (cost > 100) return
 
     /* 🔴 2026-10-25 DSH 补丁（用户：「下矿的时候 AI 更倾向直上直下，而不选择挖阶梯」）：
@@ -519,29 +523,95 @@ repIn(
     if (toBreak.length > 0) return
 
     if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater`,
-  'move 不挖脚下：getMoveDown'
+    `    cost += this.safeOrBreak(block0, toBreak)
+    if (cost > 100) return
+
+    /* 🔴 2026-10-30 DSH 补丁（用户：「这个改成代价变高，不要禁止」；2026-10-25 那版是直接
+     * 「if (toBreak.length > 0) return」判死）：要**挖**才能掉下去 ⇒ **加价**，不判死。
+     * 为什么加价而不是白给：竖井挖一格 ≈ 22（digCost 4 时），挖阶梯每下降一格要挖两格 ≈ 44 ——
+     * 乘 3 之后竖井 66 > 阶梯 44，下矿仍旧选阶梯；而柱顶那种"除了挖没别的路"的地方，
+     * A* 终于规划得出来（落差 > maxDropDown 的实心柱以前永远 NoPath）。
+     * 系数「digDownFactor」（默认 3），cfg 可用「walkDigDownFactor」覆盖。 */
+    if (toBreak.length > 0) {
+      const f = Number(this.digDownFactor ?? 3)
+      cost *= (Number.isFinite(f) && f > 0) ? f : 3
+      if (cost > 100) return
+    }
+
+    if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater`
+  ],
+  `    cost += this.safeOrBreak(block0, toBreak)
+    if (cost > 100) return
+
+    /* 🔴 2026-10-30 DSH 补丁（用户：「这个改成代价变高，不要禁止」）：要**挖**才能掉下去 ⇒
+     * **加价**，不再判死（2026-10-25 那版是 if (toBreak.length > 0) return，直接判不可行）。
+     * 加价而不是白给：竖井挖一格 ≈ 22（digCost 4），阶梯每下一格挖两格 ≈ 44 —— 乘 3 之后
+     * 竖井 66 > 阶梯 44，下矿仍走阶梯；而柱顶那种"除了挖没别的路"的地方，A* 终于规划得出来
+     * （实心柱落差 > maxDropDown 以前永远 NoPath）。
+     * 护栏：一次最多「边挖边掉」两格（再多等于挖竖井，交给 mc_dig stair）；乘完**不**按
+     * cost>100 判死 —— 深板岩柱身挖一格就 85 起步，×3 必超 100，判死就白改了。 */
+    if (toBreak.length > 0) {
+      if (toBreak.length > 2) return
+      const f = Number(this.digDownFactor ?? 3)
+      cost *= (Number.isFinite(f) && f > 0) ? f : 3
+    }
+
+    if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater`,
+  'move 挖脚下：按挖价乘 3（不禁止）'
 )
 
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
-  `    cost += this.safeOrBreak(blockD, toBreak)
+  [
+    `    cost += this.safeOrBreak(blockD, toBreak)
     if (cost > 100) return
 
     if (blockC.liquid) return // dont go underwater`,
-  `    cost += this.safeOrBreak(blockD, toBreak)
+    `    cost += this.safeOrBreak(blockD, toBreak)
     if (cost > 100) return
 
     /* 🔴 2026-10-25 DSH 补丁：斜着往下掉也**不许边挖边掉**（同上）。 */
     if (toBreak.length > 0) return
 
     if (blockC.liquid) return // dont go underwater`,
-  'move 不挖脚下：getMoveDropDown'
+    `    cost += this.safeOrBreak(blockD, toBreak)
+    if (cost > 100) return
+
+    /* 🔴 2026-10-30 DSH 补丁：斜着往下掉同样"按挖的格数加价"，不再禁止（同上）。 */
+    if (toBreak.length > 0) {
+      const f = Number(this.digDownFactor ?? 3)
+      cost *= (Number.isFinite(f) && f > 0) ? f : 3
+      if (cost > 100) return
+    }
+
+    if (blockC.liquid) return // dont go underwater`
+  ],
+  `    cost += this.safeOrBreak(blockD, toBreak)
+    if (cost > 100) return
+
+    /* 🔴 2026-10-30 DSH 补丁：斜着往下掉同样"按挖的格数加价"，不再禁止（同上）。 */
+    if (toBreak.length > 0) {
+      if (toBreak.length > 2) return
+      const f = Number(this.digDownFactor ?? 3)
+      cost *= (Number.isFinite(f) && f > 0) ? f : 3
+    }
+
+    if (blockC.liquid) return // dont go underwater`,
+  'move 斜下挖：按挖价乘 3（不禁止）'
 )
 
-/* ── 2026-10-29：均衡差不许在前方脚下垫方块（用户：「把这个功能去掉」） ──── */
+
+/* ── 2026-10-30：搭桥收进 A*（用户：「智能规划路线，不要兜底」/「allowBridge 也不行吗」）──
+ * 2026-10-29 曾经「一律不垫」，后果是 A* 里**再也没有搭桥这条边** ⇒ 过沟只能靠兜底的
+ * bridgeToward 一格一格试（每格一次 stopPathing + 等卡）。现在恢复这条边，但装上开关和代价：
+ *   · 只有 `mv.allowBridge`（来自 mc_move{allowBridge:true}）打开才生成；
+ *   · 代价 + bridgeCost（默认 5）⇒ 平地绝不选（走一格 1、垫一格 5+），沟边才比"绕 5 格"划算；
+ *   · `remainingBlocks === 0`（背包没垫脚料）时照旧不生成 —— `mv.scafoldingBlocks` 由
+ *     `src/plugins.mjs` 按背包实况设置，所以"没方块"在规划阶段就知道，不会规划出一条铺不出来的路。 */
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
-  `    if (!blockD.physical && !blockC.liquid) {
+  [
+    `    if (!blockD.physical && !blockC.liquid) {
       if (node.remainingBlocks === 0) return // not enough blocks to place
 
       if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // D intersects an entity hitbox
@@ -555,10 +625,29 @@ repIn(
       toPlace.push({ x: node.x, y: node.y - 1, z: node.z, dx: dir.x, dy: 0, dz: dir.z })
       cost += this.placeCost // additional cost for placing a block
     }`,
-  `    if (!blockD.physical && !blockD.liquid) return
+    `    if (!blockD.physical && !blockD.liquid) return
+
+    cost += this.safeOrBreak(blockB, toBreak)`
+  ],
+  `    if (!blockD.physical && !blockD.liquid) {
+      /* 🔴 2026-10-30 DSH 补丁：搭桥收进 A*（开关 + 代价） */
+      if (!this.allowBridge) return // 没开 allowBridge ⇒ 跟以前一样，A* 只管走现成地面
+      if (node.remainingBlocks === 0) return // not enough blocks to place
+      if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // D intersects an entity hitbox
+
+      if (!blockD.replaceable) {
+        if (!this.safeToBreak(blockD)) return
+        cost += this.breakLabor(blockD)
+        toBreak.push(blockD.position)
+      }
+      cost += this.exclusionPlace(blockC)
+      toPlace.push({ x: node.x, y: node.y - 1, z: node.z, dx: dir.x, dy: 0, dz: dir.z })
+      const bc = Number(this.bridgeCost ?? 5)
+      cost += (Number.isFinite(bc) && bc >= 0 ? bc : 5) + this.placeCost
+    }
 
     cost += this.safeOrBreak(blockB, toBreak)`,
-  'move 不在前方脚下垫方块：getMoveForward'
+  'move 搭桥：allowBridge 开时收进 A*（+bridgeCost）'
 )
 
 

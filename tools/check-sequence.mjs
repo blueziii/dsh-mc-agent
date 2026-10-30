@@ -79,5 +79,27 @@ section('④ 源码：合并逻辑与失败逐条都在')
   ok(/n === prev \+ 1/.test(SRC), '区间合并按“连号”判断')
 }
 
+/* 🔴 2026-11-02 审计（#15/#18）：两条判据以前是"看字段存不存在 / 靠剩余时间猜"。 */
+{
+  const { stepOk } = await import(new URL('../src/sequence.mjs', import.meta.url))
+  // #15：`attacked` 恒为目标名字 ⇒ 不能再拿它判成功；没打死但挥到过 = 这一步做完了
+  ok(stepOk({ op: 'attack' }, { killed: true, attacked: 'Bluezi' }) === true, '打死了算成功')
+  ok(stepOk({ op: 'attack' }, { killed: false, attacked: 'Bluezi', swings: 3 }) === true,
+    '🔴 没打死但挥到过也算做完（以前只认 killed ⇒ 时间到/目标跑了都判失败，整串被掐断）')
+  ok(stepOk({ op: 'attack' }, { killed: false, attacked: 'Bluezi', pvpSwings: 2 }) === true,
+    'vendor 那边挥到过同样算')
+  ok(stepOk({ op: 'attack' }, { killed: false, attacked: 'Bluezi', sawDamage: true }) === true,
+    '目标掉了血也说明打到了')
+  ok(stepOk({ op: 'attack' }, { killed: false, attacked: 'Bluezi', swings: 0, pvpSwings: 0 }) === false,
+    '一下都没挥到（够不着 / 目标没了）才算失败')
+  ok(/case 'attack': \{/.test(SRC) && /Number\(r\.swings \?\? 0\) > 0/.test(SRC),
+    '攻判据已换成看 swings/pvpSwings（不再拿恒为名字的 attacked 判，也不再只认 killed）')
+}
+// #18：抛错时必须给 stoppedAt（从第几步接着发）
+ok(/if \(stopOnError\) \{ next = i; break \}/.test(SRC),
+  '🔴 真出错也记 next（以前直接 break ⇒ 返回里没有 stoppedAt，模型只能整串重发）')
+ok(/self\.msLeft\(\) <= 0/.test(SRC) && !/\|\| self\.msLeft\(\) <= 150/.test(SRC),
+  '🔴 "没时间了"只在真的一秒不剩时兜底（以前 <=150ms 把任何错误都解释成没时间）')
+
 console.log(`\n结果：${pass}/${pass + fail} 通过，${fail} 失败`)
 process.exit(fail === 0 ? 0 : 1)

@@ -177,8 +177,10 @@ section('② 不给 who —— 敌对 > 玩家 > 动物 > 掉落物；只追怪�
     ok(f.calls.attack.length === 0 && /4\.5 格内没有能打的实体/.test(String(err?.message ?? '')),
       '远处的玩家不主动追（要打就点名）', String(err?.message ?? '').slice(0, 90))
   }
-  {   // 没有 pvp 插件 ⇒ 退回 4.5 格内挥一下
-    const near = ent({ id: 'z9', name: 'zombie', type: 'hostile', kind: 'Hostile mobs', pos: { x: 0, y: 64, z: 3 } })
+  {   /* 没有 pvp 插件 ⇒ 退回"自己挥一下"。
+       * 🔴 2026-11-02：目标从 3 格挪到 2 格 —— 3 格在服务端攻击距离（3.0）边缘，
+       *   我们保守取 `ATTACK_REACH=2.9`，3 格挥手是空挥，不该再测"3 格也得挥"。 */
+    const near = ent({ id: 'z9', name: 'zombie', type: 'hostile', kind: 'Hostile mobs', pos: { x: 0, y: 64, z: 2 } })
     const f = mkFightBot([near], { withPvp: false })
     const mc = mkMc(f)
     f.bot.attack = (t) => { f.calls.attack.push(t); return Promise.resolve() }
@@ -415,12 +417,17 @@ section('⑥ 真打得到 —— 等目标死 / 等预算用完（旧写法 awai
       '在攻击距离内 ⇒ 报"打了 N 秒还没打死，再叫一次接着打"', String(r.note))
     ok(r.waitedMs >= 350, '确实等到了预算用完', `waitedMs=${r.waitedMs}`)
   }
-  {   // 没打死 + 一直没进攻击距离 ⇒ 报"追不上"，别让它以为在挨打
+  {   /* 🔴 2026-11-01（用户 m14334：「距离 1.9 格 —— 在 3.5 内啊，却不打」）：
+       *  vendor 的 `wasInRange` 说没进距离、目标实际就在 2 格内 —— 旧代码照拄 vendor 的话，
+       *  报「还没进到攻击距离（3.5 格）」，跟同一条结果里的 `distance:1.9` 自相矛盾。
+       *  现在以**实时距离**为准：够得着就是够得着。 */
     const f = arm(mkFightBot([zombie()], { withPvp: false }), { wasInRange: false })
     const mc = mkMc(f); mc.mcPlugins = { pvp: true }
     const r = await mc.attack({ who: 'zombie', budget: 400 })
-    ok(/还没进到攻击距离/.test(String(r.note)) && /mc_move/.test(String(r.note)),
-      '一直没进距离 ⇒ 报"追不上"（走不过去 / 被挡住 / 目标太快）', String(r.note))
+    ok(r.distance <= 2.9 && /还没打死/.test(String(r.note)),
+      'vendor 说没进距离、实际在 2 格内 ⇒ 按实时距离算「够得着」（报"还没打死"）', `${r.distance} / ${r.note}`)
+    ok(!/还没进到攻击距离/.test(String(r.note)),
+      '不再出现「还没进到攻击距离（3.5 格）」这种跟 distance 自相矛盾的话', String(r.note))
   }
   {   // stop() 挂住也不能拖住这一轮（旧写法 await stop 最多等 5 秒）
     const f = arm(mkFightBot([zombie()], { withPvp: false }), { stopHangs: true })
@@ -1425,7 +1432,7 @@ section('㉑ 换武器"没生效"要说得清 —— 有更好的却没换时给
  * 也不许报成打死；③ 头顶到底封没封必须如实报（那是这套打法成不成立的前提）。 */
 section('㊳ 站桩 stand —— 不挪一步 / 打不着就等 / 头顶封没封如实报')
 {
-  const { attack, standHeadroomOf } = await import(new URL('../src/attack.mjs', import.meta.url))
+  const { attack, standHeadroomOf, ATTACK_REACH } = await import(new URL('../src/attack.mjs', import.meta.url))
 
   /* 假 bot：加 attack/lookAt/blockAt。blockAt 只认 Vec3（喂普通 {x,y,z} 会报 pos.floored），
    * 这里按"脚位往上 headroom-1 格是空气、再往上是石头"造一个 2 格洞。 */
@@ -1475,9 +1482,11 @@ section('㊳ 站桩 stand —— 不挪一步 / 打不着就等 / 头顶封没�
     const { ctx, calls } = mkCtx2()
     const r = await attack(f.bot, { who: 'zombie', budget: 400, stand: true }, ctx)
     ok(calls.move.length === 0, '🔴 够不着也不追（站桩就是不挪）', String(calls.move.length))
-    ok(f.calls.swings === 0, '🔴 4.5 格外一下都没挥（不是空挥）', String(f.calls.swings))
+    /* 🔴 2026-11-02 审计（#19）：这里原来钉着字面量 `4.5`，可站桩分支早就改用 `ATTACK_REACH`
+     *   （2.9）—— 钉数字等于让断言自己骗自己。距离一律引用常量。 */
+    ok(f.calls.swings === 0, `🔴 ${ATTACK_REACH} 格外一下都没挥（不是空挥）`, String(f.calls.swings))
     ok(r.killed !== true && r.gone !== true, '🔴 没打到就不许报 killed/gone', JSON.stringify({ k: r.killed, g: r.gone }))
-    ok(r.outOfReach && r.outOfReach.distance > 4.5, '🔴 说清"它离我多远"（outOfReach）', JSON.stringify(r.outOfReach))
+    ok(r.outOfReach && r.outOfReach.distance > ATTACK_REACH, '🔴 说清"它离我多远"（outOfReach）', JSON.stringify(r.outOfReach))
     ok(r.combat !== 'killed', '结局不是 killed', String(r.combat))
   }
 
@@ -1509,8 +1518,8 @@ section('㊳ 站桩 stand —— 不挪一步 / 打不着就等 / 头顶封没�
     ok(/kite && !standMode && canMove/.test(src), 'attack.mjs：站桩时不放风筝')
     ok(/if \(standMode\) \{\n\s*actions\.push\('hold'\)/.test(src.replace(/\r\n/g, '\n')),
       'attack.mjs：站桩时 reposition 变成 hold（不挪）')
-    ok(/await sleep\(150\)/.test(src) && /distOf\(target\) > 4\.5\) \{/.test(src),
-      'attack.mjs：站桩够不着时原地等它走近')
+    ok(/await sleep\(150\)/.test(src) && /distOf\(target\) > ATTACK_REACH\) \{/.test(src),
+      'attack.mjs：站桩够不着时原地等它走近（门槛是攻击距离，不是 4.5 的搜索范围）')
     ok(/target\.position\.offset\(0, Math\.min\(1\.3/.test(src), 'attack.mjs：出手前 lookAt 目标（按目标高度抬头）')
     ok(/standHeadroomOf/.test(src), 'attack.mjs：头顶高度走 standHeadroomOf')
   }
@@ -1567,5 +1576,22 @@ ok(!/d0 > 8/.test(atkSrc2) && /if \(d0 > 3\.5\) \{/.test(atkSrc2),
 const minSrc2b = readFileSync(new URL('../src/mining.mjs', import.meta.url), 'utf8')
 ok(/export function losBlockerAlong \(b, from, gx, gy, gz, near\)/.test(minSrc2b),
   'mining.mjs exports losBlockerAlong (attack reuses one sampler)')
+/* ─────────── ⑨ 自己挥拳（用户 m14334：「距离 1.9 格…却不打」）──────────── */
+section('⑨ 自己挥拳：出手不再交给 vendor 的后台循环（它挥没挥我们一个字都读不到）')
+ok(/export const ATTACK_REACH = 2\.9/.test(atkSrc2),
+  '自己挥拳的判定距离单独命名（2.9 格，比 vendor 的 3.5 保守）')
+ok(/if \(dd <= ATTACK_REACH\) \{/.test(atkSrc2) && /mySwings\+\+/.test(atkSrc2),
+  '追踪中自己挥拳：够得着就按手里那把的冷却挥，并记数')
+ok(/b\.pvp\.attackRange = 0/.test(atkSrc2) && /b\.pvp\.attackRange = pvpRangeSave/.test(atkSrc2),
+  'pvp 只留「帮我追过去」：临时把 attackRange 归零，结束后恢复（不抢攻击冷却）')
+ok(/b\.on\?\.\('attackedTarget', onAtk\)/.test(atkSrc2) && /removeListener\?\.\('attackedTarget', onAtk\)/.test(atkSrc2),
+  'vendor 挥了几下也数着（attackedTarget），结束时摘掉监听')
+ok(/mySwings > 0 \|\| pvpSwings > 0/.test(atkSrc2) && /<= ATTACK_REACH/.test(atkSrc2),
+  '「够不够得着」以实时距离为准（不再只读 vendor 的 wasInRange）')
+ok(/swings: mySwings, pvpSwings/.test(atkSrc2),
+  '结果里带 swings/pvpSwings：「没出手」与「出手了没打死」一眼分得清')
+ok(/const mv1 = await ctx\.moveTo\(/.test(atkSrc2) && /mv1\.arrived !== true/.test(atkSrc2),
+  '走不动时把 walkTo 返回的 hint 带出来（它不抛异常，旧写法永远写「原因不明」）')
+
 console.log(`\ncheck-core-attack：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

@@ -257,7 +257,7 @@ export async function sleepInBed (self, args = {}, ctx = {}) {
   const dist = b.entity?.position ? b.entity.position.distanceTo(bed.position ?? bedPos) : 0
   if (dist > BED_REACH) {
     walked = await self.walkTo(bedPos, {
-      arrive: 2, intent: 'interact', noDig: true, noTower: true, budget: callBudget(args.budgetMs),
+      arrive: 2, intent: 'interact', allowDig: false, noTower: true, budget: callBudget(args.budgetMs),
     })
     if (!walked?.arrived) {
       return {
@@ -403,7 +403,7 @@ export async function farmArea (self, args = {}, ctx = {}) {
         /* 🔴 2026-10-29：剩余不够就跳过这一格（不再 `max(1000, 剩余-2000)` 硬压） */
         const nb = needLeft(self, 1_000, 4_000)
         if (!nb.ok) { skipped.push({ pos: s.pos, why: 'budget', note: insufficientText(nb, '走到这一格旁边') }); continue }
-        const w = await self.walkTo(s.pos, { arrive: 2, intent: 'stand', noDig: true, noTower: true, budget: nb.budgetMs })
+        const w = await self.walkTo(s.pos, { arrive: 2, intent: 'stand', allowDig: false, noTower: true, budget: nb.budgetMs })
         if (!w?.arrived) { skipped.push({ pos: s.pos, why: 'unreachable', note: '走不过去' }); continue }
         await sleep(120)
       }

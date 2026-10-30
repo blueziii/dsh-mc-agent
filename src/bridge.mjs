@@ -236,7 +236,12 @@ export function bridgeSafetyOf (b, { feet, dir, count = 1, slope = 0, item = nul
   for (const c of cells) {
     const hz = hazardIn(b, c, 6)
     if (hz?.kind === 'fatal') {
-      hazards.push({ x: c.x, y: c.y, z: c.z, name: hz.name, dy: hz.dy, text: fatalText(hz.name) })
+      /* 🔴 2026-11-02 审计（#8）：这里原来直接 `continue` —— 跳过下面 `probe.unloaded` 那道闸门，
+       *   "岩浆 + 下方区块没加载"从**有话说**变成一句不提。岩浆格本来只警告（用户 2026-10-22
+       *   「改成警告」不改），但**不知道多深**这件事必须说出来 —— 模型据此决定绕不绕。 */
+      const probeF = dropProbe(b, c, DROP_SCAN)
+      const deep = probeF.unloaded ? '（下方区块没加载，不知道多深）' : (probeF.bottomed ? '（下面一路空到底，很深）' : '')
+      hazards.push({ x: c.x, y: c.y, z: c.z, name: hz.name, dy: hz.dy, text: fatalText(hz.name) + deep, deep })
       continue
     }
     if (hz?.kind === 'wet' && !risk) risk = `桥下 ${Math.abs(hz.dy)} 格是${hz.name}（掉下去淹不死但会湿透）`

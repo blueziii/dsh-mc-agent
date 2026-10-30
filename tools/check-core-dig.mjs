@@ -290,6 +290,24 @@ section('⑤ 够不着的文案 —— 教模型走近 + 说清"会复原"，不
   ok(!/mc_connect/.test(line), '不再建议 mc_connect 重连')
 }
 
+/* ─────────── ⑤′ 「不挖」就是真不挖 —— 绝不偷偷改成挖穿（2026-11-02 审计）─────────── */
+section('⑤′ 「不挖」就是真不挖 —— 不偷偷把 allowDig 翻成 true 重试')
+{
+  const src = await readFile(new URL('../src/mining.mjs', import.meta.url), 'utf8')
+  ok(!/allowDig: true/.test(src), 'mining 从不自己把 allowDig 翻成 true')
+  ok(/budget, allowDig \}\)/.test(src), '走路用的就是调用方给的那个 allowDig')
+  ok(/我没有挖墙/.test(src) && /digThrough:true/.test(src),
+    '不挖模式走不过去时：如实说"没挖墙"并指出 digThrough 这条路')
+  /* 🔴 2026-11-02 审计（#6）：视线只该跳「自己站的那两格（脚下 + 眼睛）+ 竖直方向最后一格」，
+   *   跳 3×3×3 会让贴身那一面墙恒判看得见（隔一格厚的墙就是最常见的情形）。 */
+  ok(/if \(bx === eyeX && bz === eyeZ && \(by === eyeY \|\| by === feetY/.test(src)
+    && !/Math\.max\(Math\.abs\(bx - near\.fx0\)/.test(src),
+    '视线自检只跳过自己站的那几格（不再跳过以眼为心的 3×3×3）')
+  /* 🔴 2026-11-02 审计（#5）：清障这条路也必须过 underfootRiskOf，别把自己脚下挖空 */
+  ok(/const foot = underfootRiskOf\(b, cell\)/.test(src) && /foot\.bad === true/.test(src),
+    '清障（digCell）也过 underfootRiskOf —— 挖了会塌/会掉进危险就不挖')
+}
+
 /* ─────────── ⑥ 够得着就原地挖：复核过才算挖掉，掉落物要自己捡回来 ─────────── */
 section('⑥ 够得着就原地挖 —— 复核过才算挖掉，掉落物要自己捡回来（2026-10-08 实机）')
 {
@@ -500,9 +518,19 @@ section('⑧ 只给坐标时 count 不生效（否则第二格会去挖"空气"�
   const r4 = underfootRiskOf(mkBot(cells4, 6), { x: 0, y: 63, z: 0 })
   /* 血 < 10 时上限降到 3 格：3 格落差仍然放行，4 格才拦 */
   ok(r4?.bad === false && r4?.dropTo === 3, '血量 < 10 时 3 格落差仍放行（上限 3）', JSON.stringify(r4))
+  /* 🔴 2026-11-02 审计（#19）：这条原来叫"血量 < 10 时 4 格落差要拦"，可它的格子里
+   *   下面全是 air、一个落点都没有 ⇒ 走的是 `land == null`（读不到底）那条分支，
+   *   跟血量一点关系都没有 —— **假通过**。现在拆成两条真用例： */
   const cells5 = Object.fromEntries([at(2, 'air'), at(3, 'air'), at(4, 'air'), at(5, 'air')])
   const r5 = underfootRiskOf(mkBot(cells5, 6), { x: 0, y: 63, z: 0 })
-  ok(r5?.bad === true, '血量 < 10 时 4 格落差要拦', String(r5?.why ?? ''))
+  ok(r5?.bad === true && /读不到|不知道多深/.test(String(r5?.why ?? '')),
+    '往下读不到底（不知道多深）⇒ 拦，且说清是"不知道"不是"确定很深"', String(r5?.why ?? ''))
+  /* 落差 9 格、血 6：MC 摔落伤害 = 9 − 3 = 6 ≥ 6 ⇒ 会摔死，拦。 */
+  const deep = Object.fromEntries([...Array.from({ length: 9 }, (_, i) => at(2 + i, 'air')), at(11, 'stone')])
+  const r6 = underfootRiskOf(mkBot(deep, 6), { x: 0, y: 63, z: 0 })
+  ok(r6?.bad === true && r6?.fallDamage === 6, '血 6 掉 9 格会摔死（6 点）⇒ 拦', String(r6?.why ?? ''))
+  const r7 = underfootRiskOf(mkBot(deep, 20), { x: 0, y: 63, z: 0 })
+  ok(r7?.bad === false && r7?.fallDamage === 6, '同样 9 格、满血 20 ⇒ 摔不死，照挖', String(r7?.why ?? ''))
 }
 
 /* ─────────── 收尾 ─────────── */

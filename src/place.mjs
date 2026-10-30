@@ -13,13 +13,15 @@
  *
  * 参数：`self` = McBot（读 `requireBot` / `giveItem` / `walkTo` / `flyTo` / `equip`，
  *       写 `_selfMovingAt`），`ctx` = `{ t }`（预算闸门 `#t`，唯一的私有件）。
- * 判据：模块不 import `core.mjs`、不 import 游戏库（只认 `b.blockAt` / `b.placeBlock` / `b.lookAt` / `b.entity`）。
+ * 判据：模块不 import `core.mjs`、不 import 游戏库（只认 `b.blockAt` / `b.placeBlock` / `b.entity`；
+ *       朝向自己写 `b.entity.yaw/pitch`，见 `faceToward`，**不用** `b.lookAt(…, true)`）。
  * ========================================================================== */
 
 import vec3pkg from 'vec3'
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 
 import { sleep } from './async-util.mjs'
+import { lookAnglesTo } from './camera.mjs'
 import { isAir, isLiquid, canPlaceInto, isEntityItem } from './block-names.mjs'
 import { pickPlaceItem, isFullBlockItem } from './place-items.mjs'
 import { heldText } from './inventory.mjs'
@@ -101,8 +103,13 @@ export function placeRef (self, pos) {
  */
 export async function confirmPlaced (b, target, { name = null, before = null, waitMs = 1_200, stepMs = 100 } = {}) {
   const t0 = Date.now()
-  const want = name ? String(name).replace(/^minecraft:/, '') : null
-  const was = before ? String(before).replace(/^minecraft:/, '') : null
+  /* 🔴 2026-11-02 审计（#2）：火把贴墙变 `wall_torch`、灵魂火把变 `soul_wall_torch` —— 期望名是
+   *   `torch`/`soul_torch`，拿世界里的 `wall_torch` 死比永远不相等 ⇒ **明明放上了也判 pending**。
+   *   `placeBlock` 末尾那条 `normName` 早就归一了，但执行路径先过这里，根本走不到那儿。
+   *   现在两边都去掉 `wall_` 再比（与踩坑 199「判成功要认变体，别认字面」同一条）。 */
+  const chip = (s2) => String(s2 ?? '').replace(/^minecraft:/, '').replace(/wall_/g, '')
+  const want = name ? chip(name) : null
+  const was = before ? chip(before) : null
   const empty = new Set(['air', 'cave_air', 'void_air'])
   let got = null
   for (;;) {
@@ -112,7 +119,7 @@ export async function confirmPlaced (b, target, { name = null, before = null, wa
       /* 🔴 2026-10-29：**没有期望名字时必须要求“和放置前不一样”** —— 以前只判“非空气”，
        *   于是往水/草丛这类可替换格里放时，那格本来就有 water/grass，会被当成“放上了”，
        *   反过来把真失败报成成功（check-core-place 就是这么照出来的）。 */
-      const okName = want ? got === want : (Boolean(got) && !empty.has(got) && got !== was)
+      const okName = want ? chip(got) === want : (Boolean(got) && !empty.has(got) && chip(got) !== was)
       if (got && !empty.has(got) && okName) {
         return { state: 'appeared', waitedMs: Date.now() - t0, expected: want ?? (was ? `not ${was}` : null), got }
       }
@@ -137,6 +144,46 @@ export function isPlaceRefused (e) {
 }
 
 /** 三种放置结果说成人话（工具返回 / 日志共用）。 */
+/* 把朝向**怼到**某个点，并等一个物理 tick 让它真的发出去。
+ *
+ * 🔴 2026-10-30 用户实机（m14028）：「往上垫有时候会失败，视线会慢慢移动到脚下那格
+ *    再搭才会成功」。转向慢是真事：mineflayer 发包时**每 tick 只允许转一小步**
+ *    （`physics.js:164-175`，`PHYSICS_TIMESTEP(0.05) * physics.yawSpeed(默认 3.0)` =
+ *    0.15 rad ≈ 8.6°/tick）⇒ 转 90° 要 11 个 tick（0.55 秒）；而 `b.placeBlock` 内部
+ *    那句 `lookAt`（`generic_place.js:37`）只 `await lookingTask` 等**一次**发包就往下走
+ *    ⇒ 真正发 `block_place` 时服务端看到的朝向还在半路上，重试几次凑巧转到位才放得上。
+ *
+ * 这里直接写 `b.entity.yaw/pitch`（和 `camera.mjs` 的 `aimAt` 同一套），并把
+ * `b.physics.yawSpeed/pitchSpeed` 提到 60（一 tick 能转 3 rad，一次到位），然后等 60ms
+ * 让物理循环把 look 包发出去。之后 `b.placeBlock` 内部那句 `lookAt` 算出的角度与我们
+ * 相同 ⇒ 走 `yawChange === 0` 的快速返回（`physics.js:343-345`），不会把发包拖到落地之后。
+ *
+ * ⚠️ 别用 `b.lookAt(point, true)`：`force` 分支（`physics.js:347-351`）把
+ *    `lastSentYaw/lastSentPitch` 直接设成目标角却**不发包** ⇒ 服务端永远不知道我们转了头。
+ */
+async function faceToward (b, point) {
+  try {
+    if (b?.physics) {
+      b.physics.yawSpeed = 60
+      b.physics.pitchSpeed = 60
+    }
+  } catch { /* 假 bot / 没装 physics 插件就跳过 */ }
+  let eye = null
+  try {
+    const ep = b.entity.position
+    eye = { x: ep.x, y: ep.y + (b.entity.eyeHeight ?? 1.62), z: ep.z }
+  } catch { return false }
+  if (!eye || !point) return false
+  const a = lookAnglesTo(eye, point)
+  if (!a) return false
+  try {
+    b.entity.yaw = a.yaw
+    b.entity.pitch = a.pitch
+  } catch { return false }
+  await sleep(60)
+  return true
+}
+
 export function placeConfirmText (c) {
   if (!c) return ''
   const at = c.got ? `那格现在是 ${c.got}` : '那格还是空的'
@@ -162,22 +209,52 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
     } catch (e) { return false }
   })()
   const waitMs = inWater ? 2500 : 700
+  /* 要放的那一面的中心（垫柱时 = 参考块顶面中心 = 自己脚底正下方那点）。 */
+  const faceCenter = (() => {
+    const rp = refBlock.position
+    return new Vec3(
+      rp.x + 0.5 + (face.x ?? 0) * 0.5,
+      rp.y + 0.5 + (face.y ?? 0) * 0.5,
+      rp.z + 0.5 + (face.z ?? 0) * 0.5)
+  })()
   try { b.setControlState('jump', true) } catch {}
   try {
     for (let i = 0; i < tries; i++) {
-      // 等脚真的离开整格（`position.y` 的小数部分不再是 0）
+      /* 每轮起跳前先把脸怼到放置面（起跳后人可能被物理/别的逻辑拧歪；60ms 在起跳前，
+       * 不占用“已经跳够了”的落地窗口）。见 faceToward 的注释。 */
+      await faceToward(b, faceCenter)
+      // 等抬升够高（脚真的离开自己站的那一格）
+      /* 🔴 2026-10-30 用户实机（m14028）：「往上垫有时候会失败」—— 原来的判据是
+       *    `position.y` 的**小数部分** > 0.05（脚离地 5cm）就放。可垫柱要放的那一格
+       *    正是**自己身体占着的那格**，脚只抬 5cm 时人还在里面，服务端不往玩家碰撞箱里
+       *    放方块 ⇒ 必被拒；跳跃最高 1.25 格，得等**抬升接近一格**才真正进窗口。
+       *    （旧注释里"等脚真的离开整格"的意图是对的，只是 `frac` 那个写法做不到 ——
+       *      跨过整数格时小数部分会从 0.99 回绕成 0.0x，反而更早 break。） */
+      const y0 = (() => { try { return b.entity?.position?.y } catch { return null } })()
+      const needRise = inWater ? 0.5 : 0.95
       const t0 = Date.now()
-      let bestFrac = -Infinity
+      let bestRise = -Infinity
       let lastProgress = Date.now()
+      let reached = false
       while (Date.now() - t0 < waitMs) {
         const y = b.entity?.position?.y
-        if (typeof y === 'number') {
-          const frac = y - Math.floor(y)
-          if (frac > 0.05) break
-          if (frac > bestFrac + 0.02) { bestFrac = frac; lastProgress = Date.now() }
+        if (typeof y === 'number' && typeof y0 === 'number') {
+          const rise = y - y0
+          if (rise >= needRise) { reached = true; break }
+          if (rise > bestRise + 0.02) { bestRise = rise; lastProgress = Date.now() }
           else if (inWater && Date.now() - lastProgress > 800) break
         }
         await sleep(20)
+      }
+      /* 🔴 2026-11-02 审计（#7）：到点没抬够以前**照样**往下放 —— 那一格还是自己身体占着，
+       *   服务端必拒，白花一次 `placeBlock` 加两次复核等待（表现出来的就是"垫柱偶发失败"）。
+       *   差得多就先重跳一轮；三次都跳不到才如实报失败。 */
+      const roseAtAll = Number.isFinite(bestRise) && bestRise > 0.05
+      if (!reached && roseAtAll && bestRise < needRise - 0.15) {
+        lastErr = new Error(`跳起来只抬到 ${Number.isFinite(bestRise) ? bestRise.toFixed(2) : '0'} 格`
+          + `（要 ${needRise} 格才进放置窗口），这一轮没放`)
+        await sleep(80)
+        continue
       }
       const target = placeTargetOf(refBlock, face)
       const want = b.heldItem?.name ?? null
@@ -348,7 +425,7 @@ export async function placeBlock (self, { x, y, z, name = null } = {}, ctx = {})
     let padError = null
     if (underFeet && !isAir(underFeet.name)) {
       await ctx.t(b.equip(item, 'hand'), 'equip', '手持垫脚方块')
-      await ctx.t(b.lookAt(below.offset(0.5, 0.5, 0.5), true), 'lookAt', '看向脚下')
+      await ctx.t(faceToward(b, below.offset(0.5, 0.5, 0.5)), 'lookAt', '看向脚下')
       try {
         await ctx.t(placeWhileJumping(b, underFeet, { x: 0, y: 1, z: 0 }), 'place', '垫脚')
       } catch (e) { padError = e }
@@ -367,7 +444,7 @@ export async function placeBlock (self, { x, y, z, name = null } = {}, ctx = {})
     }
   }
   await ctx.t(b.equip(item, 'hand'), 'equip', '手持方块')
-  await ctx.t(b.lookAt(ref.ref.position.offset(0.5, 0.5, 0.5), true), 'lookAt', '看向放置面')
+  await ctx.t(faceToward(b, ref.ref.position.offset(0.5, 0.5, 0.5)), 'lookAt', '看向放置面')
   /* 🔴 2026-10-17（用户实机：「`mc_act {mode:"place"}` 放不了自己脚下，经典 pillar-jump 做不成，
    *    这是我在竖井里爬不上去、反复淹死的直接原因」）：
    *    目标格正是**自己身体占着的那一格**（脚下 / 齐腰）时，站着放必被服务端拒 ——
@@ -382,9 +459,15 @@ export async function placeBlock (self, { x, y, z, name = null } = {}, ctx = {})
   try {
     if (isOwnCell) await ctx.t(placeWhileJumping(b, ref.ref, ref.face), 'place', '跳起来放到自己脚下')
     else {
+      /* 🔴 2026-11-02 审计（#1）：这里原来**不传 before** —— 而 `name` 取的是 `b.heldItem?.name`，
+       *   放完最后一块时手里是空的 ⇒ `name` 为 null、`before` 也是 null ⇒ 判据退化成"那格非空 = 成功"，
+       *   往水/草里放（本来就有别的方块）时把真失败报成成功。现在先记下放置前那格是什么。 */
+      const tgt = placeTargetOf(ref.ref, ref.face)
+      let beforeAt = null
+      try { beforeAt = tgt ? (b.blockAt(tgt, false)?.name ?? null) : null } catch { beforeAt = null }
       await ctx.t(b.placeBlock(ref.ref, new Vec3(ref.face.x, ref.face.y, ref.face.z)), 'place', '放置方块')
       /* 🔴 用户 2026-10-29：回包成功 ≠ 方块真出现（幽灵方块 / 回包丢）。回头看一眼世界。 */
-      const c = await confirmPlaced(b, placeTargetOf(ref.ref, ref.face), { name: b.heldItem?.name ?? null, waitMs: 700 })
+      const c = await confirmPlaced(b, tgt, { name: b.heldItem?.name ?? null, before: beforeAt, waitMs: 700 })
       try { b.__placeConfirm = c } catch { /* 同上 */ }
       if (c.state !== 'appeared') {
         try { self.log(`🧱 放置未确认：${placeConfirmText(c)}`) } catch { /* 同上 */ }

@@ -428,14 +428,14 @@ section('⑧ 静态接线：core / index 都在')
   ok(!/mode === 'swim'/.test(index), 'index.js 的 mc_move 已经没有 swim 分支了')
   ok(!/sess\.bot\.swimUp\(\{ hold: callBudget/.test(index), 'index.js 里不再有"只上浮"的分支（上浮由 walkSwim 自己按 jump）')
   /* 2026-10-15：walkTo 的返回值现在过 `withOutcome(..., { expect: 'moved' })`（结果台账要判得动）。 */
-  ok(/walkWithAutoDig\(sess, target, \{ noDig,[^}]*?noTower: args\.allowTower !== true[^}]*?intent: intentArgOf\(args\.intent\)[^}]*?waterRecover: typeof args\.waterRecover === 'boolean'[^}]*?xz: wantsXZ \}/.test(index), 'walk 仍走 walkWithAutoDig（走不通改成挖；自救开关透传）')
+  ok(/walkWithAutoDig\(sess, target, \{ allowDig,[^}]*?noTower: args\.allowTower !== true[^}]*?intent: intentArgOf\(args\.intent\)[^}]*?waterRecover: typeof args\.waterRecover === 'boolean'[^}]*?xz: wantsXZ \}/.test(index), 'walk 仍走 walkWithAutoDig（走不通改成挖；自救开关透传）')
   ok(/在水里会自动改成"直接游"/.test(index), 'mc_move 描述里写明"在水里自动直接游"')
   ok(/在水里（氧气/.test(index), 'mc_status 瘦身视图里带氧气')
   ok(/头在水下/.test(index), 'mc_status 读不到氧气时也说清"头在水下"')
   ok(!/mode="swim"/.test(index), 'mc_move 描述里不再出现 swim')
   ok(/walk \/ fly \/ jump \/ boat/.test(index) && !/walk \/ fly \/ jump \/ swim/.test(index), 'mode 说明改成 walk / fly / jump / boat')
   ok(!/walk \/ walk-nodig \/ fly/.test(index) && !/mode === 'walk-nodig'/.test(index),
-    '`mode:"walk-nodig"` 已删除（2026-10-25 用户要求，和 noDig:true 重复）')
+    '`mode:"walk-nodig"` 已删除（2026-10-25 用户要求，和"不许挖"重复 —— 现在就是 `allowDig:false` 这个默认）')
 
   const auto = strip(readFileSync(new URL('../extensions/mc_auto.mjs', import.meta.url), 'utf8'))
   ok(/const DROWN_WAKE_GAP_MS = 6_000/.test(auto), 'mc_auto 有憋气叫醒间隔')
@@ -470,10 +470,34 @@ section('⑧ 游泳：按目标高度决定上浮 + 连续没靠近就收手')
   const me = { y: 60 }
   ok(swimJumpWanted({}, { y: 62 }, me, 20) === true, '目标在上面 ⇒ 上浮')
   ok(swimJumpWanted({}, { y: 60 }, me, 20) === true, '同一层 ⇒ 还是按着（水里不按每秒沉约 2 格）')
+  /* 🔴 2026-10-30 用户：「在水下不应该恒上浮，y 大于当前位置才上浮」——
+   *    判据变成：更高/同层 ⇒ 浮着；更低 ⇒ **只有那格真是水**才松手沉下去；
+   *    更高但读不出方块（假 bot / 区块没加载）⇒ 保守上浮，不会一路沉。 */
+  const botWater = { blockAt: () => ({ name: 'water' }) }
+  const botStone = { blockAt: () => ({ name: 'stone' }) }
   ok(swimJumpWanted({}, { y: 55 }, me, 20) === true,
-    '🔴 目标在下面也照样上浮（用户 m05864：「让它一直浮在水面」—— 不再按目标高度自动下沉）')
+    '目标更低但那格**不是水**（读不到/岸上那格的 y）⇒ 仍然上浮（不一路沉）')
+  ok(swimJumpWanted(botWater, { y: 55 }, me, 20) === false,
+    '🔴 目标更低且那格真是水 ⇒ 松手沉下去（这才是"潜到水下"）')
+  ok(swimJumpWanted(botStone, { y: 55 }, me, 20) === true,
+    '目标更低、那格是石头（AI 猜的 y）⇒ 上浮，不拿头去撞地')
+  ok(swimJumpWanted(botWater, { y: 55 }, me, 4) === true,
+    '🔴 目标是水下的，但快没气了 ⇒ 先上去换气（命比目标重要）')
+  ok(swimJumpWanted(botWater, { y: 60 }, me, 20) === true,
+    '目标在水里且**同层** ⇒ 还是按着（横渡不按每秒沉 2 格）')
   ok(swimJumpWanted({}, { y: 55 }, me, 4) === true, '🔴 快没气了 ⇒ 不管目标在哪都先上去')
   ok(swimJumpWanted({}, { y: 60 }, null, 20) === true, '读不到自己的位置 ⇒ 保守上浮（别乱沉）')
+  /* 用户 2026-10-30：「要到水下如果没关 auto 的自动上浮，要提醒」——
+   *   autoFloat 每 500ms 把人顶回水面，跟"目标更低就沉下去"打架。这里只查**契约**：
+   *   `mc_auto` 把开关挂到 b.__mcAutoFloat、游泳段读到就提醒，而且**不替用户关**。 */
+  const movSrc0 = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  const autoSrc0 = readFileSync(new URL('../extensions/mc_auto.mjs', import.meta.url), 'utf8')
+  ok(/b\.__mcAutoFloat = beh\.autoFloat !== false/.test(autoSrc0),
+    'mc_auto 把 autoFloat 开着没有挂到 b.__mcAutoFloat 上')
+  ok(/diveGoal && b\.__mcAutoFloat === true/.test(movSrc0),
+    '游泳段：目标是水下 + autoFloat 还开着 ⇒ 触发提醒')
+  ok(/autoFloatBlocking: true/.test(movSrc0) && /autoFloat":false/.test(movSrc0),
+    '提醒里给出关法（mc_auto {set:{"autoFloat":false}}），但**不自己关**')
 
   /** 自带的假 bot：`forward` 按住时按 2 格/秒朝 aim 走（y 不变）；`frozen` = 一格都不动。 */
   const mkSwimBot = ({ frozen = false, pos = [0, 60, 0] } = {}) => {

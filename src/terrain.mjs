@@ -15,7 +15,7 @@
  *
  *   - **只调权重，不换算法** —— A* 还是 mineflayer-pathfinder 的（用户 2026-10-06：
  *     "应该有写好的防卡住项目…完全是瞎动"，所以不自写寻路）。
- *   - **用户显式配置优先** —— `cfg.walkMaxDropDown` / `walkDigCost` / `walkPlaceCost` /
+ *   - **用户显式配置优先** —— `cfg.walkMaxDropDown` / `walkDigCost` / `walkTowerCost` /
  *     `walkLiquidCost` / `walkAllowParkour` 只要设过，地形档案就盖不过它（`profileFor` 的 `over`）。
  *   - **判不出来就 `unknown`** —— 区块没加载 / `blockAt` 抛错时不硬猜，给回默认权重
  *     （宁可"和平地一样走"，也不要凭半个世界瞎定策略）。
@@ -63,18 +63,22 @@ export const TERRAIN_PROFILES = {
   // 延迟下 parkour 落地判定很容易摔（`walkAllowParkour` 默认关的原因）
   steps: { maxDropDown: 3, liquidCost: 4, digCost: 3, placeCost: 10, allowParkour: false },
   // 落差：把"允许往下跳"收窄到 2 格；垫方块放宽（垫一格比摔下去便宜），挖更贵（挖了脚下可能塌）
-  drops: { maxDropDown: 2, liquidCost: 6, digCost: 5, placeCost: 8, allowParkour: false },
+  // 2026-10-30：**开跑酷** —— 柱林/断崖之间"跨 1~2 格"正是跑酷边能生成的走法，
+  //   以前全档关掉，A* 在这里必然 NoPath，只能靠兜底一格一格试（用户：「智能规划路线，不要兜底」）。
+  //   开是安全的：落点要实心 + 上方两格净空（vendor `getMoveParkourForward` 自己检查），
+  //   再加 `parkourPenalty`（默认 4）⇒ 只在"省下的路 > 4 步"时才选。
+  drops: { maxDropDown: 2, liquidCost: 6, digCost: 5, placeCost: 8, allowParkour: true },
   // 沟/缺口：更不想下水（掉进去常常出不来，`walkSwim` 只保证"游到附近"）；
   // 垫方块比平地（12）便宜一点，但**不能是全表最便宜的** —— 2026-10-17 实机（要塞里）：
   // 地形判成 gap、`placeCost = 4` 让寻路器一路往脚下垫柱子（`pillared: 11`），其中一次放置
   // 被服务端拒（vendor `index.js:563` 的 `place_error`），**那一刻人已经在半空** ⇒ 从 y=68
   // 掉到 y=47。垫方块的代价里必须算上"垫失败 = 摔下去"，所以抬到 8（= `drops`）：仍比平地
   // 便宜，但比挖一格（5）贵 —— 沟边更倾向绕路 / 挖台阶，真要过去就用 `mc_act {mode:"bridge"}`。
-  gap: { maxDropDown: 2, liquidCost: 8, digCost: 5, placeCost: 8, allowParkour: false },
+  gap: { maxDropDown: 2, liquidCost: 8, digCost: 5, placeCost: 8, allowParkour: true },
   // 危险地形（岩浆/火/仙人掌/细雪）：一格都别往下跳、水一滴都别碰、挖穿更贵（挖开可能放出岩浆）
   hazard: { maxDropDown: 1, liquidCost: 20, digCost: 8, placeCost: 8, allowParkour: false },
   // 窄道：挖更贵（挖了容易把自己埋了 / 掉下去），垫方块稍微放宽（贴墙走不动时垫一格）
-  narrow: { maxDropDown: 2, liquidCost: 4, digCost: 5, placeCost: 10, allowParkour: false },
+  narrow: { maxDropDown: 2, liquidCost: 4, digCost: 5, placeCost: 10, allowParkour: true },
   // 判不出来（区块没加载 / 没 bot）：退回平地那套
   unknown: { maxDropDown: 3, liquidCost: 4, digCost: 4, placeCost: 12, allowParkour: false },
 }
@@ -84,7 +88,10 @@ export const TERRAIN_CFG_KEYS = {
   maxDropDown: 'walkMaxDropDown',
   liquidCost: 'walkLiquidCost',
   digCost: 'walkDigCost',
-  placeCost: 'walkPlaceCost',
+  /* 🔴 2026-11-02 审计（#9）：原来映射到 `walkPlaceCost`，可真正读这个值的地方是
+   *   `plugins.mjs` 的 `walkTowerCost` ⇒ **两个名字两套默认**，用户配哪个都可能不生效。
+   *   现在统一到 `walkTowerCost` 一个名字。 */
+  placeCost: 'walkTowerCost',
   allowParkour: 'walkAllowParkour',
 }
 

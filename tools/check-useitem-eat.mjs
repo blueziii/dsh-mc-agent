@@ -14,6 +14,7 @@
  *
  * 用法：node tools/check-useitem-eat.mjs（**必须从包目录跑**）
  */
+import { readFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { useItem } from '../src/world-use.mjs'
 
@@ -77,5 +78,12 @@ console.log('④ 非食物（末影珍珠）⇒ 不掺食物字段，hold 原样
   ok(r.heldMs === 60 && r.used === 'ender_pearl', 'heldMs/used 原样', JSON.stringify({ h: r.heldMs, u: r.used }))
 }
 
+/* 🔴 2026-11-02 审计（#17）：\`autoHoldForFood\` 是我们自己把按住时间从 0 拉长到 1.8 秒的，
+ *    松手条件却只看 \`want > 0\` ⇒ 吃完东西一直举在手上。谁延长谁负责松。 */
+{
+  const src = readFileSync(new URL('../src/world-use.mjs', import.meta.url), 'utf8')
+  ok(/\(want > 0 \|\| autoHoldForFood\) && typeof b\.deactivateItem === 'function'/.test(src),
+    '🔴 自动延长按住时间（autoHoldForFood）时也要松手，不然食物一直举在手上')
+}
 console.log(`\nverify-eat：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

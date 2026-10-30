@@ -244,7 +244,10 @@ export async function useItem (b, { hold = 0, x, y, z } = {}, ctx = {}) {
   const consumeWatch = isFood ? watchOwnConsume(b, Math.max(1_500, effectiveMs + 900)) : null
   await t(Promise.resolve(b.activateItem()), 'act', `使用 ${item.name}`)
   if (effectiveMs > 0) await sleep(effectiveMs)
-  if (want > 0 && typeof b.deactivateItem === 'function') {
+  /* 🔴 2026-11-02 审计（#17）：原来只有 `want > 0` 才松手 —— 可 `autoHoldForFood` 是**我们**
+   *   自己把按住时间从 0 拉长到 1.8 秒的（`want === 0` 路线），于是吃完永远不松手，
+   *   物品一直举在手上。谁延长了按住时间，谁就负责松手。 */
+  if ((want > 0 || autoHoldForFood) && typeof b.deactivateItem === 'function') {
     await t(Promise.resolve(b.deactivateItem()), 'act', `松开 ${item.name}`)
   }
   /* 等"咽下去了"的回执（最多再等 900ms）—— 只报事实，不改任何决策 */
@@ -332,6 +335,7 @@ export async function interact (self, args = {}) {
   if (mode === 'break') return { mode, ...(await self.breakBlock(args)) }
   if (mode === 'toward') {
     const b = self.requireBot()
+    let walked = null
     if (!args.who) throw new Error('toward 需要 who（玩家名）')
     const r = await self.lookAt({ who: args.who })
     if (args.approach !== false) {
@@ -340,9 +344,18 @@ export async function interact (self, args = {}) {
        *   `lookAt()` 返回的 `lookingAt` 才是目标的实际坐标（`src/camera.mjs:96`），直接用它的 y。
        *   另外原来在这里和后面各 `lookAt` 了一次、最后 return 又调一次（共 3 次），中间那次是多余的。 */
       const eye = { x: r.lookingAt.x, y: r.lookingAt.y, z: r.lookingAt.z }
-      await self.walkTo(eye, { arrive: 3, budget: callBudget(args.budgetMs) })
+      /* 🔴 2026-11-02 审计（#14）：这里以前把 `walkTo` 的返回值整条丢掉 —— 它**不抛错**，
+       *   走不到就回 `{ arrived: false, remaining: 12.3, hint: … }`，于是 `mc_act{toward}`
+       *   永远报"到了"（顺手把 `sequence` 里的 `toward` 步骤也变成永远成功）。
+       *   现在如实带出来。 */
+      const w = await self.walkTo(eye, { arrive: 3, budget: callBudget(args.budgetMs) }).catch((e) => ({ arrived: false, reason: e?.message }))
+      walked = w ? {
+        arrived: w.arrived !== false,
+        ...(w.remaining != null ? { remaining: w.remaining } : {}),
+        ...(w.arrived === false ? { hint: String(w.hint ?? w.reason ?? '没走到（没给原因）').slice(0, 200) } : {}),
+      } : null
     }
-    return { mode, ...(await self.lookAt({ who: args.who })), position: self.position }
+    return { mode, ...(await self.lookAt({ who: args.who })), position: self.position, ...(walked ? { walked } : {}) }
   }
   throw new Error(`未知 mode：${mode}（可用 look / place / break / toward）`)
 }

@@ -56,8 +56,18 @@ export function stepOk (step, r) {
        *    只有 `broken === false` 才是真的没挖成（够不着 / 挖不动 / 被复原）。 */
       if (r.broken === null) return true
       return r.broken !== false && r.broken != null
-    case 'attack':
-      return r.killed !== false && r.attacked !== false
+    case 'attack': {
+      /* 🔴 2026-11-02 审计（#15）：原来是 `r.killed !== false && r.attacked !== false`，
+       *   而 `attacked` 恒为**目标名字**（字符串，见 attack.mjs 的 `attacked: label`）⇒
+       *   这条判据其实只剩"打死了吗"：时间到、目标跑了、只挥了两拳 —— 全算失败，
+       *   `stopOnError` 于是把整串掐断，后面的步骤一步不跑。
+       *   现在：打死了算成功；没打死但**确实挥到过**（swings/pvpSwings > 0，或目标掉了血）
+       *   也算这一步做完了；一下都没挥到（够不着 / 目标没了）才算失败。 */
+      if (r.killed === true) return true
+      if (Number(r.swings ?? 0) > 0 || Number(r.pvpSwings ?? 0) > 0) return true
+      if (r.sawDamage === true) return true
+      return false
+    }
     /* 🔴 2026-10-15 审计（报告 C 第 1 条）：下面 equip / toss / use / useitem 四条原来都是
      *   `r.xxx !== false` —— 而那几个字段**要么根本不存在、要么永远是真值**，于是"失败的步骤
      *   被算成成功"，`stopOnError` 也就永远不触发。改成看各动作**真正复核过的**字段
@@ -175,11 +185,16 @@ export async function runSequence (self, steps, { stopOnError = true, budgetMs =
       /* 🔴 2026-10-08 审计⑦：预算用尽也可能是**步骤自己**先发现的（`jump` / `flyTo` 开头就查
        *    `msLeft()`，`#t()` 也会抛带 `mcCallOver` 的错）。那时错误文案是"这一轮的 N 秒用完了"。
        *    不能让它变成"整串失败、从第 1 步重来"：跟循环顶部那支一样记下停在第几步。 */
+      /* 🔴 2026-11-02 审计（#18）：兜底那条原来写 `self.msLeft() <= 150` —— 只要抛错那一刻
+       *   剩余时间不到 0.15 秒，**任何**错误（含真正的 bug、NaN、插件异常）都会被解释成
+       *   "这轮没时间了"，真实原因被吞掉。现在只在真的一秒不剩时才兜底。 */
       const exhausted = e?.mcCallOver === true
         || /这一轮的 [\d.]+ 秒用完了|这一轮的时间已经用完了/.test(String(e?.message ?? ''))
-        || self.msLeft() <= 150
+        || self.msLeft() <= 0
       if (exhausted) { next = i; break }
-      if (stopOnError) break
+      /* 🔴 2026-11-02 审计（#18）：真出错（不是"没时间"）时以前直接 `break`，**不设 `next`** ⇒
+       *   返回里没有 `stoppedAt` / "从第几步接着发"，模型只能整串从头重发，前面做成功的白做。 */
+      if (stopOnError) { next = i; break }
     }
   }
   const okCount = results.filter((r) => r.ok).length
@@ -269,13 +284,14 @@ export async function runStep (self, s) {
       // 🔴 2026-10-08 审计⑤：fly 以前**不传 budgetMs** —— AI 写 `budgetMs:2000` 想飞一小段，
       //    实际跑满 callBudget 的 10 秒，把整串步骤的预算全吃掉。
       if (mode === 'fly') return { ...(await self.flyTo(target.x, target.y, target.z, { budget: callBudget(s.budgetMs) })), mode }
-      // 用户 2026-10-20：走路**默认不挖方块**（和 mc_move 一致）—— 要挖得在步骤里写 `noDig:false`
-      /* 🔴 2026-10-24 用户实机：这里以前只传 budget/noDig，**把 intent 丢了** ⇒
+      // 用户 2026-10-20：走路**默认不挖方块**（和 mc_move 一致）—— 要挖得在步骤里写 `allowDig:true`
+      // 2026-10-30 用户：「nodig 改成 allowdig 默认 false」—— 步骤字段改名 `allowDig`（旧 `noDig` 仍认）。
+      /* 🔴 2026-10-24 用户实机：这里以前只传 budget、把挖不挖的开关漏了，**把 intent 丢了** ⇒
        *    步骤里写 `intent:"stand"` 也永远按 near（半径 1.6）判到达，差 1.5 格就算"到了"。 */
       return {
         ...(await self.walkTo(target, {
           budget: callBudget(s.budgetMs),
-          noDig: s.noDig !== false,
+          allowDig: s.allowDig !== undefined ? s.allowDig === true : s.noDig === false,
           ...(s.intent ? { intent: s.intent } : {}),
         })),
         mode,

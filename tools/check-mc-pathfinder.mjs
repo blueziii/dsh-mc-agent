@@ -280,8 +280,117 @@ section('5. getMoveDiagonal()：斜切拐角被禁（这才是实机真正的病
 }
 
 
-/* ─────────── 6. 「不破坏方块」的走路模式（noDig）─────────── */
-section('6. mc_move 的 noDig：走路一格都不挖')
+/* ── 5b. getMoveDown：要挖才能掉下去 ⇒ 加价，不判死（2026-10-30）────────────
+ * 用户原话：「这个改成代价变高，不要禁止」。以前补丁是 if (toBreak.length > 0) return，
+ * 实心柱/实心墙落差一超 maxDropDown 就永远 NoPath ⇒ 柱顶下不来。
+ * 现在照常生成这条边，代价乘 digDownFactor（默认 3）。
+ * 注：这条只证明「vendor 不再判死 + 系数真乘上去了」；落差上限仍归 getLandingBlock 管。 */
+{
+  const Movements2 = req(join(PF_DIR, 'lib', 'movements.js'))
+  const Block2 = req('prismarine-block')(mcData)
+  const Vec2 = req('vec3').Vec3 ?? req('vec3')
+  const cells2 = new Map()
+  const k2 = (x, y, z) => `${x},${y},${z}`
+  const fill2 = (x, y, z, name) => {
+    const b = Block2.fromStateId(mcData.blocksByName[name].defaultState, 0)
+    b.position = new Vec2(x, y, z)
+    cells2.set(k2(x, y, z), b)
+  }
+  for (let y = 60; y <= 68; y++) for (let z = 4; z <= 6; z++) fill2(0, y, z, 'air')
+  fill2(0, 65, 5, 'stone')   // 脚下方块（要挖掉才好掉）
+  fill2(0, 64, 5, 'stone')   // 柱身下一格（落点，落差 2 格）
+  const bot2 = {
+    registry: mcData,
+    username: 'check',
+    entity: { position: V(0.5, 66, 5.5), username: 'check', effects: [] },
+    entities: {},
+    game: { minY: -64 },
+    pathfinder: { bestHarvestTool: () => null },
+    blockAt: (p) => cells2.get(k2(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))) ?? null
+  }
+  const mv2 = new Movements2(bot2)
+  const node2 = { x: 0, y: 66, z: 5, remainingBlocks: 0 }
+  const nb = []
+  mv2.getMoveDown(node2, nb)
+  ok(nb.length === 1, '脚下实心（要挖一格才掉得下去）⇒ 仍然给出下移的边（以前被补丁判死）',
+    JSON.stringify(nb.map((m) => ({ y: m.y, toBreak: (m.toBreak ?? []).length, cost: m.cost }))))
+  ok((nb[0]?.toBreak ?? []).length === 1, 'toBreak 记着「要挖那一格」', String((nb[0]?.toBreak ?? []).length))
+  const base = nb[0]?.cost ?? 0
+  ok(base > 1, `代价带上挖方（cost=${base}；不挖的空气柱是 1）`, String(base))
+  mv2.digDownFactor = 9
+  const nb9 = []
+  mv2.getMoveDown(node2, nb9)
+  ok(Math.abs((nb9[0]?.cost ?? 0) - base * 3) < 1e-6,
+    'digDownFactor=9 ⇒ 代价正好是默认(3)的三倍（系数确实接上去了）', `${nb9[0]?.cost} vs ${base}`)
+  mv2.digDownFactor = 0
+  const nb0 = []
+  mv2.getMoveDown(node2, nb0)
+  ok((nb0[0]?.cost ?? 0) === base, '非法系数（0）退回默认 3，不会把代价乘成 0', String(nb0[0]?.cost))
+}
+
+/* ── 5c. getMoveForward：搭桥收进 A*（2026-10-30 用户：「智能规划路线，不要兜底」）──
+ * 以前 2026-10-29 改成"一律不垫" ⇒ A* 里没有搭桥这条边 ⇒ 过沟只能靠兜底的 bridgeToward。
+ * 现在：`allowBridge` 开才生成，代价 + bridgeCost（默认 5）。 */
+{
+  const Movements3 = req(join(PF_DIR, 'lib', 'movements.js'))
+  const Block3 = req('prismarine-block')(mcData)
+  const Vec3b = req('vec3').Vec3 ?? req('vec3')
+  const cells3 = new Map()
+  const k3 = (x, y, z) => `${x},${y},${z}`
+  const fill3 = (x, y, z, name) => {
+    const b = Block3.fromStateId(mcData.blocksByName[name].defaultState, 0)
+    b.position = new Vec3b(x, y, z)
+    cells3.set(k3(x, y, z), b)
+  }
+  /* 人站 (0.5,66,5.5)；脚下 (0,65,5) 实心、自己两格空；东边 (1,65,5)/ (1,66,5) 全是空气 = 沟 */
+  for (let x = -1; x <= 3; x++) for (let y = 64; y <= 68; y++) for (let z = 4; z <= 6; z++) fill3(x, y, z, 'air')
+  for (let x = -1; x <= 3; x++) for (let z = 4; z <= 6; z++) fill3(x, 65, z, 'stone')
+  fill3(0, 66, 5, 'air'); fill3(0, 67, 5, 'air')
+  fill3(1, 65, 5, 'air'); fill3(1, 66, 5, 'air'); fill3(1, 67, 5, 'air')   // 东边是沟
+  const bot3 = {
+    registry: mcData,
+    username: 'check',
+    entity: { position: V(0.5, 66, 5.5), username: 'check', effects: [] },
+    entities: {},
+    game: { minY: -64 },
+    pathfinder: { bestHarvestTool: () => null },
+    blockAt: (p) => cells3.get(k3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))) ?? null
+  }
+  const mv3 = new Movements3(bot3)
+  const node3 = { x: 0, y: 66, z: 5, remainingBlocks: 8 }
+  const EAST = { x: 1, z: 0 }
+  mv3.allowBridge = false
+  const nbOff = []
+  mv3.getMoveForward(node3, EAST, nbOff)
+  ok(nbOff.length === 0, 'allowBridge 关（默认）⇒ 前方脚下是沟时不生成边（A* 只管走现成地面）', String(nbOff.length))
+  mv3.allowBridge = true
+  const nbOn = []
+  mv3.getMoveForward(node3, EAST, nbOn)
+  ok(nbOn.length === 1, 'allowBridge 开 ⇒ 生成「垫一格走过去」的边（这才是 A* 里的桥）', String(nbOn.length))
+  ok((nbOn[0]?.toPlace ?? []).length === 1, '这条边带着 toPlace（执行时真的要放一格）', String((nbOn[0]?.toPlace ?? []).length))
+  const c5 = nbOn[0]?.cost ?? 0
+  ok(c5 >= 5, `代价含 bridgeCost（cost=${c5}，走一格是 1）`, String(c5))
+  mv3.bridgeCost = 20
+  const nb20 = []
+  mv3.getMoveForward(node3, EAST, nb20)
+  ok(Math.abs((nb20[0]?.cost ?? 0) - c5 - 15) < 1e-6, 'bridgeCost=20 ⇒ 代价比默认(5)多 15（系数真接上去了）', `${nb20[0]?.cost} vs ${c5}`)
+  mv3.bridgeCost = 5
+  node3.remainingBlocks = 0
+  const nb0 = []
+  mv3.getMoveForward(node3, EAST, nb0)
+  ok(nb0.length === 0, '背包没垫脚料（remainingBlocks=0）⇒ 不生成 —— 不会规划出一条铺不出来的路', String(nb0.length))
+  node3.remainingBlocks = 8
+}
+
+ok(/mv\.bridgeCost = Number\(self\.cfg\?\.walkBridgeCost \?\? 5\)/.test(plugSrc),
+  'movements() 把 bridgeCost 接到 cfg（默认 5）—— A* 里的桥就是靠这个定"垫一格 = 多走 5 步"')
+ok(/parkourPenalty: Number\(self\.cfg\.walkParkourPenalty \?\? 4\)/.test(plugSrc),
+  'movements() 给跑酷边加价（默认 4）—— 不钉死"到处跳"')
+ok(/if \(m\.parkour === true\) m\.cost = \(Number\(m\.cost\) \|\| 0\) \+ parkourPenalty/.test(plugSrc),
+  '加价真的按 parkour 标记筛（只罚跳远边，不误伤普通走）')
+
+/* ─────────── 6. 「不破坏方块」的走路模式（allowDig:false）─────────── */
+section('6. mc_move 的 allowDig（默认 false）：走路一格都不挖')
 
 /* 用户 2026-10-20：「move 加一个不破坏方块的模式」。这条链路跨两个文件：
  *   index.js（mc_move 的参数与分发）→ src/movement.mjs（walkTo/walkToOnce/walkPathfinder 把
@@ -292,23 +401,30 @@ const patchSrc = readFileSync(new URL('./patch-mc-deps.mjs', import.meta.url), '
 const mvSrc = readFileSync(join(HERE, '..', 'src', 'movement.mjs'), 'utf8')
 const countOf = (hay, needle) => hay.split(needle).length - 1
 
-ok(/noDig: \{ type: 'boolean'/.test(mcIndexSrc), 'mc_move 有 noDig 参数')
+ok(/allowDig: \{ type: 'boolean'/.test(mcIndexSrc), 'mc_move 有 allowDig 参数')
 ok(/walk \/ fly \/ jump \/ boat/.test(mcIndexSrc), 'mode 说明里没有 walk-nodig / swim（都已删）')
 ok(!/mode === 'walk-nodig'/.test(mcIndexSrc), '分发里没有 walk-nodig 分支（已删）')
-ok(/const noDig = args\.noDig !== false/.test(mcIndexSrc),
-  '默认不挖：只有显式 noDig:false 才允许挖')
+/* 🔴 2026-10-30 用户：「nodig 改成 allowdig 默认 false」—— 名字和默认值必须同向：
+ *   参数叫 allowDig，那"给 true 才挖"；老字段 noDig:false 作为「等价 allowDig:true」仍认一次。 */
+ok(/const allowDig = args\.allowDig !== undefined \? args\.allowDig === true : args\.noDig === false/.test(mcIndexSrc),
+  '默认不挖：只有显式 allowDig:true 才允许挖（老字段 noDig:false 仍认）')
 const seqSrc = readFileSync(join(HERE, '..', 'src', 'sequence.mjs'), 'utf8')
-ok(/noDig: s\.noDig !== false/.test(seqSrc), 'mc_sequence 的 move 步骤默认也不挖（和 mc_move 一致）')
+ok(/allowDig: s\.allowDig !== undefined \? s\.allowDig === true : s\.noDig === false/.test(seqSrc),
+  'mc_sequence 的 move 步骤默认也不挖（和 mc_move 一致，老字段 noDig:false 仍认）')
 /* 2026-10-27（用户：「把 mode swim 去掉」）：swim 分支删了，现在只剩 walk 这一条出口。 */
-ok(/noDig,[^}]*?noTower: args\.allowTower !== true[^}]*?intent: intentArgOf\(args\.intent\)/.test(mcIndexSrc)
+ok(/allowDig,[^}]*?noTower: args\.allowTower !== true[^}]*?intent: intentArgOf\(args\.intent\)/.test(mcIndexSrc)
   && countOf(mcIndexSrc, 'walkWithAutoDig(sess, target,') === 1,
-  'noDig 传进了走路调用（walk 那条；swim 分支已删）')
+  'allowDig 传进了走路调用（walk 那条；swim 分支已删）')
 /* 2026-10-25（用户：「move和dig如果没办法到那格应该自动切换成可破坏」）：
  *   walk 那条改走 `walkWithAutoDig` —— 先不挖走一遍，走不通自动改成挖穿挡路方块再走。 */
-ok(/walkWithAutoDig\(sess, target, \{ noDig, noTower: args\.allowTower !== true/.test(mcIndexSrc),
+ok(/walkWithAutoDig\(sess, target, \{ allowDig, noTower: args\.allowTower !== true/.test(mcIndexSrc),
   'walk 走自动挖穿兜底（walkWithAutoDig）')
-ok(/const walkWithAutoDig = async \(sess, target, opts, budgetMs, autoDig\)/.test(mcIndexSrc),
-  'walkWithAutoDig 收 autoDig 开关（显式 noDig:false 时不自动挖）')
+/* 🔴 2026-11-02 审计：以前传的是 `allowDig !== true` ⇒ 显式写 `allowDig:false` 也被当成"没给"、
+ *   走不通就自己改成挖穿（关掉的开关被绕过）。现在只有**压根没给开关**才允许自动挖穿。 */
+ok(/const walkWithAutoDig = async \(sess, target, opts, budgetMs, autoDig\)/.test(mcIndexSrc)
+  && /const digGiven = args\.allowDig !== undefined \|\| args\.noDig !== undefined/.test(mcIndexSrc)
+  && /args\.budgetMs, !digGiven\)/.test(mcIndexSrc),
+  'walkWithAutoDig 收 autoDig 开关（只有没给 allowDig 时才自动挖；显式 false 就照 false 来）')
 ok(/autoDigWorth/.test(mcIndexSrc) && /AUTO_DIG_REASONS/.test(mcIndexSrc),
   '只对「路被挡/卡住/不可达/头顶被堵」这类原因升级，其余不重试')
 /* 🔴 2026-10-25 自查抓到的真 bug：AUTO_DIG_REASONS 里原来写的是 'stuck' / 'no-path' / 'unreachable'
@@ -329,16 +445,27 @@ ok(/String\(r\.reason \?\? ''\) === 'timeout' && Boolean\(r\.blockedAhead\)/.tes
   '第一遍 timeout 但眼前真被方块挡着 ⇒ 剩下时间改成挖穿（不再白扔）')
 /* 🔴 2026-10-28（用户：「刚刚的 move 就给 4 秒」）：40% 切分已撤销 —— 第一遍直接吃满。
  *   真走不通会自己早退（NoPath 实测 0.3 秒），不需要预先切给第二遍。 */
-ok(/noDig: true, budget: total \}\)/.test(mcIndexSrc) && !/total \* 0\.4/.test(mcIndexSrc),
+ok(/allowDig: false, budget: total \}\)/.test(mcIndexSrc) && !/total \* 0\.4/.test(mcIndexSrc),
   '第一遍"一格不挖"直接吃满预算（不再切 40%），走不通自己早退、剩下的留给挖穿')
 ok(/budgetPlan: \{ totalMs: total, trialMs: total/.test(mcIndexSrc),
   '返回里带 budgetPlan（这一轮一共几秒 / 试绕路几秒 / 挖穿几秒）')
-ok(countOf(mvSrc, 'noDig = false, xz = false } = {}, ctx = {})') === 3,
-  'walkToUnguarded / walkToOnce / walkPathfinder 三个函数都收 noDig（连 xz 一起逐层转发）',
-  String(countOf(mvSrc, 'noDig = false, xz = false } = {}, ctx = {})')))
-ok(countOf(mvSrc, 'if (noDig) mv') === 3,
-  '三处新建 Movements 都关掉 canDig（出厂 / 垫柱 / 地形重估）', String(countOf(mvSrc, 'if (noDig) mv')))
-ok(/const carveAllowed = !noDig &&/.test(mvSrc), '卡住时"挖开台阶"的补救也因 noDig 关掉')
+ok(countOf(mvSrc, 'allowDig = false, xz = false } = {}, ctx = {})') === 3,
+  'walkToUnguarded / walkToOnce / walkPathfinder 三个函数都收 allowDig（连 xz 一起逐层转发）',
+  String(countOf(mvSrc, 'allowDig = false, xz = false } = {}, ctx = {})')))
+ok(countOf(mvSrc, 'if (allowDig !== true) mv') === 2,
+  '新建 Movements 处都关掉 canDig（出厂 / 地形重估；垫柱那处随 towerFallback 一起删了）', String(countOf(mvSrc, 'if (allowDig !== true) mv')))
+ok(/const carveAllowed = allowDig === true &&/.test(mvSrc), '卡住时"挖开台阶"的补救也因 allowDig 关掉')
+
+/* 🔴 2026-10-30 守门：一个概念只能有一个名字。
+ *   内部（src/）再出现 `noDig` 变量就是写回旧名了 —— 只允许三种合法残留：
+ *     ① 常量 `MOVE_ESCAPES_NODIG`（它描述的是"不挖那套阶梯"，不是开关）；
+ *     ② 历史用户原话（`用户：「…noDig:false…」`，只许读到、不许当参数用）；
+ *     ③ 老字段兼容读 `s.noDig === false`。
+ *   一旦有人新写 `noDig = true` / `if (noDig)`，这条立刻红。 */
+ok(countOf(mvSrc, 'noDig = false') === 0 && countOf(mvSrc, 'if (noDig)') === 0
+  && countOf(mvSrc, '!noDig') === 0 && countOf(mvSrc, 'noDig = true') === 0,
+  '🔴 内部不再有 noDig 开关变量（只剩常量名 MOVE_ESCAPES_NODIG 与历史注释）',
+  JSON.stringify({ a: countOf(mvSrc, 'noDig = false'), b: countOf(mvSrc, 'if (noDig)'), c: countOf(mvSrc, '!noDig') }))
 /* 🔴 2026-10-20：goal-reached-elsewhere（别人的 goal_reached 把我这次 goto 一起 resolve）要自己重试一次，
  *   实机撞到过两次「同一目标第一次秒返回、第二次才走」。只重试这一个 reason，且要有剩余预算。 */
 ok(/info\.reason === 'goal-reached-elsewhere'/.test(mvSrc) && /retriedElsewhere: true/.test(mvSrc),
@@ -391,6 +518,20 @@ section('传送门：只给 x/z 也要能进')
     '命中门就升级成三维精确目标（GoalXZ 只锁水平两维，人站不进去）')
 }
 
+/* 🔴 2026-10-30 用户：「这个改成代价变高，不要禁止」。
+ *    `getMoveDown` / `getMoveDropDown` 原来被补成 `if (toBreak.length > 0) return`（判死），
+ *    后果是**实心柱/实心墙落差超过 maxDropDown 就永远 NoPath** —— 柱顶下不来就是这么来的。
+ *    现在改成"照常生成这条边，代价乘 `digDownFactor`（默认 3）"：
+ *    竖井 22×3=66 > 阶梯 44 ⇒ 下矿仍走阶梯，柱顶才肯挖。
+ *    ⚠️ 读的是 vendor **真文件**，不是补丁源 —— 补丁源里那段旧文本还留着当迁移锚点。 */
+const movSrc = existsSync(join(PF_DIR, 'lib', 'movements.js')) ? readFileSync(join(PF_DIR, 'lib', 'movements.js'), 'utf8') : ''
+ok(!/^\s*if \(toBreak\.length > 0\) return$/m.test(movSrc), 'vendor 里已经没有"要挖就整条判死"')
+ok(/cost \*= \(Number\.isFinite\(f\) && f > 0\) \? f : 3/.test(movSrc), 'vendor 里按挖价乘系数（默认 3）')
+ok(/if \(cost > 100\) return/.test(movSrc), '乘完之后仍然守住 cost>100 的不可行线')
+ok(/mv\.digDownFactor = Number\(self\.cfg\?\.walkDigDownFactor \?\? 3\)/.test(plugSrc),
+  'plugins 把 digDownFactor 接到 cfg（walkDigDownFactor）')
+ok(/this\.digDownFactor \?\? 3/.test(patchSrc), '补丁写进 vendor 的是实例字段 digDownFactor，缺省 3')
+
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败项'}：pass=${pass} fail=${fail}`)
 ok(/bot\.pathfinder\.sneakWhenPlacing = false/.test(indexSrc),
   'vendor 默认就是「站着放」（sneakWhenPlacing 初始化为 false）')
@@ -403,9 +544,20 @@ ok(/放方块前不再蹲着贴边/.test(patchSrc),
 
 /* 🔴 2026-10-31 用户实机：「allowTower 能上去的地方也会搭方块」。
  *    上游 `placeCost` 默认 1 ⇒ 垫一格 = 多走 1 步，能跳上去、能绕两步的地方也去垫。
- *    现在按“多绕 N 步”计价（默认 12）。 */
-ok(/mv\.placeCost = Number\(self\.cfg\.walkTowerCost \?\? 4\)/.test(plugSrc),
-  '垫一格的代价按“多绕 N 步”算（不是上游的 1）')
-ok(/walkTowerCost: 4/.test(coreSrc), 'cfg 里 walkTowerCost 默认 4（垫一格 ≈ 多走 4 步）')
+ *    现在按“多绕 N 步”计价（地形档案给 8~12）。
+ * 🔴 2026-11-02 审计（#9）：`walkTowerCost` 曾经是**死配置** —— 它在 `applyProfile()` **之前**
+ *    赋值，档案随后无条件盖掉 `placeCost`。现在钉三件事：默认交给档案、配置只在档案之后覆盖、
+ *    且 `null` 不能被当成 0。 */
+const iApply = plugSrc.indexOf('applyProfile(mv, profile)')
+const iTower = plugSrc.indexOf('mv.placeCost = Number(self.cfg.walkTowerCost)')
+ok(iTower > 0, '垫一格的代价按“多绕 N 步”算（不是上游的 1）')
+ok(iApply > 0 && iTower > iApply,
+  'walkTowerCost 在地形档案之后才生效（以前写在 applyProfile 之前 ⇒ 配置是死的）')
+ok(/self\.cfg\?\.walkTowerCost != null && Number\.isFinite/.test(plugSrc),
+  'walkTowerCost 用 null 表示“不覆盖”，别让 Number(null)=0 把垫柱变成免费')
+ok(/walkTowerCost: null/.test(coreSrc), 'cfg 里 walkTowerCost 默认 null（= 按地形档案）')
+ok(/placeCost: 'walkTowerCost'/.test(terrainSrc) && !/placeCost: 'walkPlaceCost'/.test(terrainSrc),
+  '地形档案的 placeCost 只认 walkTowerCost 一个名字（以前两套名字两套默认）')
+
 
 process.exit(fail === 0 ? 0 : 1)

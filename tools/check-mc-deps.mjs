@@ -215,7 +215,13 @@ section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做
       && /if \(!blockC\.physical && !blockC\.liquid\) return/.test(src),
       'getMoveForward / getMoveJumpUp：前方脚下为空就 return（不垫方块）',
       '重装 vendor 后要重打：node tools/patch-mc-deps.mjs')
-    ok(!/this\.allowBridge/.test(src), 'vendor 里已不再读 allowBridge（搭路不靠 A*）')
+    /* 🔴 2026-10-30 用户：「搭桥不是 A* 的边……allowbridge 也不行吗」——
+     *    以前 vendor 真的**不读** `allowBridge`（2026-10-29 我们把"顺手垫一格"整段删了），
+     *    桥只在兜底 `bridgeToward` 里叫。现在改了：**开着 allowBridge 才生成搭桥边**，
+     *    且按 `bridgeCost` 加价 —— 让 A* 自己"为了过沟主动铺一格"。 */
+    ok(/this\.allowBridge/.test(src), 'vendor 读 allowBridge（开着才生成搭桥边）')
+    ok(/if \(!this\.allowBridge\) return/.test(src), '没开 allowBridge ⇒ 跟以前一样不垫（默认行为没变）')
+    ok(/number\s*\/\*|bridgeCost/.test(src) && /this\.bridgeCost/.test(src), '搭桥边按 bridgeCost 加价（不是白送）')
     ok(/allow1by1towers[\s\S]{0,3000}?toPlace\.push/.test(src),
       '原地垒柱子（getMoveUp）仍受 allow1by1towers 管（allowTower 功能没丢）')
     /* jumpUp 里“在目标格下面垫一格”也应消失 */
@@ -224,5 +230,12 @@ section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做
   }
 }
 
+/* 2026-10-30 实机（目标 (16,63,88)、一步没挪就报“四周全是实心方块”）：
+ *   vendor 的 setGoal 无条件 resetPath('goal_updated')，而 goal_updated 不在 RESUMABLE_RESETS 里
+ *   ⇒ stopPathing 为真时直接 stop()、goto 被 reject，我们就当“路线作废”收工；
+ *   而真正的兜底（往上挖 / 往下走 / 挖开挡路）一步都没跑。 */
+ok(/RESUMABLE_RESETS = new Set\(\[[^\]]*'goal_updated'/.test(
+  readFileSync(join(VN, 'mineflayer-pathfinder', 'index.js'), 'utf8')),
+  '★ vendor：goal_updated 也算“可恢复的重置”（setGoal 无条件 resetPath，不能因此判路线作废）')
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败项'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

@@ -185,9 +185,9 @@ export const DEFAULTS = {
   connectTimeoutMs: 45_000,
   moveBudgetMs: CALL_BUDGET_MS,   // 2026-10-28 参数审计：原来 40_000（超单次上限 CALL_MS）⇒“忘了传 budget”的内部走路以为有 40 秒
   preferDoors: true, doorDigPenalty: 8,   // 优先走门/绕路：给"挖墙"加代价（2026-10-18）
-  walkDigFirst: true, walkDigFirstCost: 0.4,   // 2026-10-27：显式 noDig:false ⇒ 挖按"多走一步"计价，走最短那条（见 src\plugins.mjs 的 digFirst）
-  walkDigDetourMax: 15,   // 2026-10-27：每挖一格额外按"多绕 N 步"记账 ⇒ 绕 ≤N 格不挖、超过才挖（用户：noDig:false 会挖家）
-  walkTowerCost: 4,   /* 2026-10-31：垫一格按“多绕 N 步”计价（上游 placeCost=1 太便宜）⇒ 能跳/能绕就不垫，只有真没路才垫 */
+  walkDigFirst: false, walkDigFirstCost: 0.4,   // 2026-10-31：默认关（一律先绕、绕不过才挖）；true = 挖一格按 0.4 步计价
+  walkDigDetourMax: 15,   // 2026-10-27：每挖一格额外按"多绕 N 步"记账 ⇒ 绕 ≤N 格不挖、超过才挖（用户：允许挖（`allowDig:true`）会挖家）
+  walkTowerCost: null,   // null = 按地形档案（平地 12 / 沟 8…），显式给数值才覆盖
   walkLeafDigPenalty: 6,   // 2026-10-29：树叶不进禁挖名单，改成每格按 ×N 记账（塞进 mv.dshBreakPenalty；0 = 回到禁挖）
   /* 2026-10-23：耕地/土径不进 A* 的落脚点（防踩坏、防挖开挡路的）。代价：唯一通路时寻路报 NoPath 而不是硬穿。 */
   chatHistory: 300,

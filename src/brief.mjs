@@ -24,7 +24,7 @@ const SENSE_KEYS = ['around', 'entities', 'nearby', 'foes', 'foesNear', 'dropsWh
 const DIAG_KEYS = [
   'blockedAhead', 'planStep', 'planTried', 'resetReasons', 'pathResets', 'dugBlocks',
   'pillaredWith', 'digStalled', 'thrash', 'escapes', 'swimShift', 'stuckAt', 'blockedBy',
-  'stepUp', 'carveTries', 'towerTried', 'doorTries', 'pathLenPlanned',
+  'stepUp', 'carveTries', 'doorTries', 'pathLenPlanned',
 ]
 
 /** 多行文本折叠：首行 + 坏消息行，最多 `maxLines` 行。 */
@@ -69,4 +69,23 @@ export function briefOf (value, { json = (x) => JSON.stringify(x), maxLines = BR
   if (typeof value === 'string') return briefText(value, { maxLines })
   if (typeof value?.text === 'string') return briefText(value.text, { maxLines })
   return json(briefValue(value))
+}
+
+/**
+ * 把结果里的**非有限数**（`NaN` / `Infinity`）换成 `null`（2026-10-30 实机：
+ * `mc_move` 连着两次返回 `invalid output: value is not lossless JSON` —— DSH 的结果要过
+ * 「无损 JSON」校验，NaN 过不去 ⇒ **整次调用的正常提示全丢**，模型只收到一句 Error，
+ * 于是只能换目标再瞎试一次）。数字算不出来就写 null，渲染层显示 `?`，
+ * 比让整条结果作废好。
+ */
+export function finiteOnly (v, depth = 0) {
+  if (depth > 8) return v
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (Array.isArray(v)) return v.map((x) => finiteOnly(x, depth + 1))
+  if (v && typeof v === 'object') {
+    const out = {}
+    for (const [k, x] of Object.entries(v)) out[k] = finiteOnly(x, depth + 1)
+    return out
+  }
+  return v
 }

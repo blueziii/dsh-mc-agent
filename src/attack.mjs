@@ -157,6 +157,11 @@ function kiteSpotOf (b, target, { distance = KITE_DISTANCE } = {}) {
  *  🔴 2026-10-27：`stand` 是给"在头顶搭个小平台、站在 2 格洞里打末影人"用的 ——
  *    末影人 3 格高进不来，所以"头顶到底封没封"才是这套打法成不成立的前提，必须如实报出来。
  *  🔴 `b.blockAt()` 只认真 Vec3：这里必须用 `position.offset()`，喂普通 `{x,y,z}` 会报 `pos.floored is not a function`。 */
+/* 自己挥拳的判定距离（格）。**比 vendor 的 3.5 保守**：`distOf` 量的是「脚到脚」的中心距，
+ * 服务端判「能不能打到」量的是**眼睛到碰撞箱**、且带 1 格容差 ⇒ 2.9 才稳
+ * （参考 mineflayer-pvp/lib/PVP.js:41  this.attackRange = 3.5）。 */
+export const ATTACK_REACH = 2.9
+
 export function standHeadroomOf (b) {
   const p = b?.entity?.position
   if (!p || typeof p.offset !== 'function' || typeof b.blockAt !== 'function') return null
@@ -419,6 +424,23 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
     let grewSince = 0
     let lastDist = distOf(target)
     const hpStart = Number(b.health)
+    /* 🔴 2026-11-01（用户 m14334：「他在 (21,64,90) 我在 (21,64,88) —— 2 格距离！应该能打」
+     *    + 「距离 1.9 格 —— 在 3.5 内啊，却不打」）：
+     *   以前**出手完全交给 vendor 的后台循环**（`physicTick` 上的 `update()`）——
+     *   它挥没挥、挥了几下，我们一个字都读不到 ⇒ 人站在 1.9 格内、一下不挥，
+     *   最后还报「还没进到攻击距离（3.5 格）」，跟同一条结果里的 `distance:1.9` 自相矛盾。
+     *   现在自己挥：实时距离 + 视线 + 冷却，每轮循环判一次；pvp 只剩「帮我追过去」。 */
+    let mySwings = 0
+    let pvpSwings = 0
+    let lastSwingAt = 0
+    let swingCd = swingCooldownMsOf(b).ms
+    let losNote = null
+    const onAtk = () => { pvpSwings++ }
+    /* pvp 只用来追（`GoalFollow`）：`attackRange` 归零 ⇒ 它的 `checkRange` 永远判「不在范围」⇒
+     * 它不挥拳，也就不会跟我们抢攻击冷却（两头同时挥，每一刀都落在冷却里，伤害打折）。 */
+    let pvpRangeSave = null
+    try { pvpRangeSave = b.pvp.attackRange; b.pvp.attackRange = 0 } catch { /* 老版本没这字段就算了 */ }
+    try { b.on?.('attackedTarget', onAtk) } catch { /* 事件挂不上不影响出手 */ }
     try {
       /* 🔴 2026-10-28（用户：「有高低差呢」）：pvp 的挥拳只判**距离**，不管中间有没有东西 ——
        *    隔着一层地板/墙时它照样空打到预算耗尽。这里先做视线检查，被挡就不进战斗。 */
@@ -458,6 +480,27 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
           chaseGiveUp = true
           break
         }
+        /* ③ 自己挥拳。够得着就按手里那把的冷却挥（剑 700ms / 斧 1250ms / 空手 250ms）。 */
+        if (dd <= ATTACK_REACH) {
+          const now2 = Date.now()
+          if (now2 - lastSwingAt >= swingCd) {
+            const losM = losBlockOf(target)
+            if (losM) { losNote = losM; break }   /* 隔着方块就别挥（挥了也是空，还看不出原因） */
+            lastSwingAt = now2
+            try {
+              const eh = Number(target.height) > 0 ? Number(target.height) : 1.8
+              await b.lookAt(target.position.offset(0, Math.min(1.3, eh * 0.5), 0))
+            } catch { /* 看不过去也照打，别因为转头失败就不出手 */ }
+            /* 走 `ctx.t` 的预算闸门（与 `engageSwing` 同一个口径）：发包要记账，预算见底时它会抛。 */
+            try {
+              await ctx.t(Promise.resolve(b.attack(target)), 'attack', `攻击 ${label}`)
+              mySwings++
+            } catch { /* 预算用尽 / 服务端没接 ⇒ 下一轮再试 */ }
+            swingCd = swingCooldownMsOf(b).ms
+            await sleep(60)
+            continue
+          }
+        }
         /* ③ 举盾：只在"等它打过来"的窗口举 0.3 秒，挡完立刻放（举着不能攻击，会拖慢输出） */
         if (opts.shield && (++ticks % 8) === 0) {
           try { b.activateItem(true); shields++ } catch { /* 没有副手盾 / 插件不支持就跳过 */ }
@@ -473,6 +516,8 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
       /* 🔴 这里**不能 await**：`pvp.stop()` 里 `onceWithTimeout('path_stop', 5000)` 最多等 5 秒，
        *    会把这一轮的预算整段吃光（而且 pathfinder 的 stop 在它第一行就已经做了）。 */
       try { Promise.resolve(b.pvp.stop()).catch(() => {}) } catch { /* 停不掉也不影响 */ }
+      try { if (pvpRangeSave != null) b.pvp.attackRange = pvpRangeSave } catch { /* 恢复不了也没事 */ }
+      try { b.removeListener?.('attackedTarget', onAtk) } catch { /* 忽略 */ }
       eatBack(ae)
     }
     const gone = !b.entities?.[target.id] || target.isValid === false
@@ -481,7 +526,12 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
      *    ⇒ "够不够得着"永远判成 false。实测 slime 从 16 血被打到 6.9 血（确实贴着打到了），
      *    结果却报"追了 1.2 秒还没进到攻击距离"+ 整轮 `outcome: failed` / `combat: unreachable`。
      *    目标**掉过血**就是"进过攻击距离"的铁证（它不会隔空掉血），拿它兜底。 */
-    const inRange = Boolean(b.pvp?.wasInRange) || sawDamage
+    /* 🔴 2026-11-01：`wasInRange` 只在 vendor 的 `checkRange()` 里更新，而它开头
+     *   `if (this.timeToNextAttack < 0) return` —— 提前 return 就不更新；`sawDamage` 又要读到目标掉血
+     *   （打**玩家**时血量根本看不到）。两个都落空 ⇒ `inRange:false` ⇒ 站在 1.9 格也报「没进攻击距离」。
+     *   现在以**实时距离**为准，再并上「我自己挥过 / vendor 挥过 / 它掉过血」。 */
+    const inRange = Boolean(b.pvp?.wasInRange) || sawDamage || mySwings > 0 || pvpSwings > 0
+      || Number(distOf(target).toFixed(1)) <= ATTACK_REACH
     const hpAfter = gone ? (killed ? 0 : null) : entityHealth(b, target)
     const waitedMs = Date.now() - t0
     if (gone && !killed && !pvpErr) {
@@ -520,7 +570,11 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
           + '；也可以先 mc_move 到它旁边，或换个不跑的目标'
     }
     return {
-      attacked: label, distance: d, killed, gone, health: b.health, via: 'pvp', waitedMs,
+      attacked: label, distance: Number(distOf(target).toFixed(1)), killed, gone, health: b.health, via: 'pvp', waitedMs,
+      /* 追上了却没伤到人时，这两条是唯一的分辨依据：`swings:0` = 压根没出手，
+       * `swings>0` 而 `killed:false` = 出手了没打死（伤害不够/它跑得快）。 */
+      swings: mySwings, pvpSwings,
+      ...(losNote ? { losBlocked: { x: losNote.at.x, y: losNote.at.y, z: losNote.at.z, name: losNote.blocker } } : {}),
       ...(mem.approachMoved != null ? { approachMoved: mem.approachMoved } : {}),
       ...(mem.targetSpeed ? { targetSpeed: mem.targetSpeed } : {}),
       ...(hpBefore != null && hpAfter != null && hpBefore !== hpAfter ? { targetHealth: `${hpBefore} → ${hpAfter}` } : {}),
@@ -556,10 +610,12 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
     /* 挥砍节奏按**手里那把**算（剑 700ms / 斧 1250ms / 镐 850ms / 空手 250ms，含 1 tick 余量，见 src/combat-timing.mjs）。
      * 旧版写死 620ms：拿斧或铲时每次都在冷却没满时挥 —— 那一刀是**打折伤害**。 */
     let swing = swingCooldownMsOf(b)
-    /* 站桩：不追，等目标自己走进 4.5 格（末影人会自己凑过来；追过去就掉出那个 2 格洞了）。 */
+    /* 站桩：不追，等目标自己走进**攻击距离**（末影人会自己凑过来；追过去就掉出那个 2 格洞了）。
+     * 🔴 2026-11-02 审计（#3）：这里原来是 4.5（搜索范围）。4.5 格挥手服务端不认 ——
+     *   2026-10-30 实机「距离 1.9 格却不打」同根：一处算 4.5 一处算 3.5，谁都不服谁。 */
     const waitFrom = Date.now()
     if (standMode) {
-      while (Date.now() - t0 < bd && distOf(target) > 4.5) {
+      while (Date.now() - t0 < bd && distOf(target) > ATTACK_REACH) {
         if (ctx.abortSignal?.aborted) break
         if (!b.entities?.[target.id] || target.isValid === false) break
         await sleep(150)
@@ -570,7 +626,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
     while (Date.now() - t0 < bd) {
       if (ctx.abortSignal?.aborted) break
       if (!b.entities?.[target.id] || target.isValid === false) break
-      if (distOf(target) > 4.5) break
+      if (distOf(target) > ATTACK_REACH) break
       /* 隔着方块就不挥（挥了也是空，而且看不出原因） */
       const losM = losBlockOf(target)
       if (losM) { losBlocked = losM; break }
@@ -592,7 +648,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
       }
     }
     // 没有 pvp 时至少挥一下（bd=0 说明这一轮已经用完了，那就别再拖）
-    if (swings === 0 && b.entities?.[target.id] && target.isValid !== false && distOf(target) <= 4.5 && !ctx.abortSignal?.aborted) {
+    if (swings === 0 && b.entities?.[target.id] && target.isValid !== false && distOf(target) <= ATTACK_REACH && !ctx.abortSignal?.aborted) {
       try { await ctx.t(Promise.resolve(b.attack(target)), 'attack', `攻击 ${label}`); swings = 1 } catch {}
       await sleep(200)
       sample()
@@ -605,7 +661,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
      *   **东西在哪**才是 AI 决策的依据（值不值得下那个崖 / 隔了几格）。
      *   这里只报事实，不替 AI 走过去。 */
     const drops = killed ? dropListOf(b, { radius: 10, limit: 4 }) : []
-    const inRange = distOf(target) <= 4.5
+    const inRange = distOf(target) <= ATTACK_REACH
     eatBack(ae)
     /* 🔴 2026-10-20 审计（真 bug）：下面原来两次 spread `note`，后一个会把前一个**整个盖掉**
      *    —— `gone && !killed` 那句"别当成打死了"在挨打时永远看不到。合成一条。 */
@@ -615,7 +671,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
     if (hardHurt) notes.push(`这一轮挨了 ${(hpStart - Number(b.health)).toFixed(0)} 点伤害 —— 血掉太快，提前收手`)
     const nowDist = distOf(target)
     return {
-      attacked: label, distance: d, swings, killed, gone, health: b.health,
+      attacked: label, distance: Number(nowDist.toFixed(1)), swings, killed, gone, health: b.health,
       ...(losBlocked ? { losBlocked: { x: losBlocked.at.x, y: losBlocked.at.y, z: losBlocked.at.z, name: losBlocked.blocker } } : {}),
       ...(notes.length ? { note: notes.join('；') } : {}),
       ...(standMode
@@ -915,7 +971,13 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
         if (pt && pickMs >= 600) {
           const p0 = mp ? { x: mp.x, y: mp.y, z: mp.z } : null
           try {
-            await ctx.moveTo(pt, { arrive: 1.2, budget: pickMs, reason: `战斗接近：先走到「${label}」旁边` })
+            /* 🔴 2026-11-01：`walkTo` 是**返回结果对象**（`{ arrived:false, hint, reason }`）、
+             *   不抛异常 —— 旧写法只在 catch 里记 `moveErr` ⇒ 静默失败永远显示「原因不明」。
+             *   现在把 `hint` 原样带出来（「前方 10,53,81 的脚下是 stone（没有两格高）」这种）。 */
+            const mv1 = await ctx.moveTo(pt, { arrive: 1.2, budget: pickMs, reason: `战斗接近：先走到「${label}」旁边` })
+            if (mv1 && mv1.arrived !== true) {
+              moveErr = String(mv1.hint ?? mv1.reason ?? '走到一半停了，没给原因').slice(0, 160)
+            }
           } catch (e) {
             moveErr = String(e?.message ?? e).slice(0, 140)
           }
@@ -935,7 +997,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
           actions.push('approach')
           if ((mem.approachFails ?? 0) >= 3) {
             unreachable = true
-            moveErr = `连续 3 次都走不到「${label}」旁边：${moveErr ?? '原因不明'}`
+            moveErr = `连续 3 次都走不到「${label}」旁边：${moveErr ?? '每次都没挪动（没给出原因）'}`
             break
           }
           if (ctx.callLeft() <= 800) { timedOut = true; break }
@@ -1020,7 +1082,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
   })
   /* 够不着/超时时没有"进攻结果"可继承 ⇒ 自己拼一份，字段名与旧的一致 */
   const base = last ?? {
-    attacked: label, distance: d, killed: false, gone: false, health: b.health,
+    attacked: label, distance: Number(distOf(target).toFixed(1)), killed: false, gone: false, health: b.health,
   }
   const { _sawDamage, _inRange, _gone, _killed, _shields, _hardHurt, _chaseGiveUp, ...clean } = base
   /* 够不着/超时/被中止时，旧 `note` 那句"再叫一次接着打"是误导 ⇒ 换成策略层的话 */

@@ -240,7 +240,7 @@ export async function tradeVillager (self, args = {}, ctx = {}) {
     const p = ent.position
     walked = await self.walkTo(
       { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
-      { arrive: 2, intent: 'interact', noDig: true, noTower: true, budget: callBudget(args.budgetMs) },
+      { arrive: 2, intent: 'interact', allowDig: false, noTower: true, budget: callBudget(args.budgetMs) },
     )
     if (!walked?.arrived) {
       return {

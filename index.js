@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { resolve, sep, join, isAbsolute, dirname, basename } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { briefOf } from './src/brief.mjs'
+import { briefOf, finiteOnly } from './src/brief.mjs'
 import { McBot, lossless, logLine, logDebug, logOnce, logLevel, libraryInfo, CALL_MS, callBudget, redactPath } from './src/core.mjs'
 import { defineTool, toolDefKind, loosenNumberParams, coerceNumberArgs } from './src/tool-def.mjs'
 import { inWaterNow } from './src/world-observer.mjs'
@@ -2808,7 +2808,7 @@ export function apply(ctx, rawConfig) {
 
   /**
    * 🔴 2026-10-25（用户：「move和dig如果没办法到那格应该自动切换成可破坏」）：
-   *   默认不挖（`noDig:true`）走不通时，**自动**改成允许挖穿挡路方块再走一次。
+   *   默认不挖（`allowDig:false`）走不通时，**自动**改成允许挖穿挡路方块再走一次。
    *   只在这几种原因上重试：路被方块挡住 / 卡住 / 目标不可达 / 头顶被堵（`no-headroom`）。
    *   区块没加载、预算用完、危险方块、服务端不回包、被叫停都不重试（挖了也没用，还可能添乱）。
    *   时间分配：第一遍不挖只给 40%（优先让它绕路），剩下的 60% 留给挖穿那一遍（总共仍不超过一次调用的预算）。
@@ -2826,14 +2826,14 @@ export function apply(ctx, rawConfig) {
       || (String(r.reason ?? '') === 'timeout' && Boolean(r.blockedAhead)))
   const walkWithAutoDig = async (sess, target, opts, budgetMs, autoDig) => {
     const total = callBudget(budgetMs)
-    if (!autoDig) return await sess.bot.walkTo(target, { ...opts, noDig: opts.noDig !== false, budget: total })
-    /* 🔴 2026-10-27 实机（用户：「水里用 move」）：`noDig:true` 那套"先一格不挖试 40%、走不通再改成挖穿"
+    if (!autoDig) return await sess.bot.walkTo(target, { ...opts, allowDig: opts.allowDig === true, budget: total })
+    /* 🔴 2026-10-27 实机（用户：「水里用 move」）：`allowDig:false` 那套"先一格不挖试 40%、走不通再改成挖穿"
      *   在**深水**里毫无意义 —— 水格挖不动也绕不开，游泳是唯一的路。以前照样按 40% 试、失败再来一遍，
      *   实测 5 次 `swim-budget` 全是 `budgetMs × 0.4`（9000→3.8 秒、10000→4.0 秒）：一条 20 格的河
      *   被切成两段各 3~4 秒，模型得连叫三次才过。深水里直接一遍吃满预算（第二遍对游泳没有新信息）。 */
     let deepWater = false
     try { deepWater = inWaterNow(sess?.bot) && sess?.bot?.entity?.onGround !== true } catch { deepWater = false }
-    if (deepWater) return await sess.bot.walkTo(target, { ...opts, noDig: true, budget: total })
+    if (deepWater) return await sess.bot.walkTo(target, { ...opts, allowDig: false, budget: total })
     const secOf = (ms) => `${(Math.max(0, Math.round(ms / 100)) / 10).toFixed(1)} 秒`
     const t0 = Date.now()
     /* 第一遍（一格不挖）只分 40%：优先让它绕路。剩下的时间一定留给"挖穿"那一遍，
@@ -2843,11 +2843,11 @@ export function apply(ctx, rawConfig) {
      *    现在第一遍**直接吃满**：真走不通会很快返回（实测 NoPath 0.3 秒），剩下的时间自然
      *    全留给"挖穿"那一遍；而"一直在走、只是没走到"本来就不该被切碎。
      *    第二遍的门槛提到 3 秒 —— 剩不到 3 秒挖穿也挖不了几块，白折腾。 */
-    const first = await sess.bot.walkTo(target, { ...opts, noDig: true, budget: total })
+    const first = await sess.bot.walkTo(target, { ...opts, allowDig: false, budget: total })
     if (!autoDigWorth(first)) return { ...first, budgetPlan: { totalMs: total, trialMs: total } }
     const left = total - (Date.now() - t0)
     if (left < 3_000) return { ...first, budgetPlan: { totalMs: total, trialMs: total, digMs: 0 } }
-    const second = await sess.bot.walkTo(target, { ...opts, noDig: false, budget: left })
+    const second = await sess.bot.walkTo(target, { ...opts, allowDig: true, budget: left })
     if (second?.arrived === true) {
       return {
         ...second,
@@ -4145,7 +4145,7 @@ export function apply(ctx, rawConfig) {
       + '🔴 没走到时报 `pathLen`（剩余路径几格）+ `estCalls`（还要几次调用，一次 10 秒 ≈ 24 格）。\n'
       + '🔴 结果带 `above`（头顶净空 `headroom` / `canJump`）：`canJump:false` 就是跳不起来（`note` 说哪格堵着），先挖开或换落点，别反复 `mode:"jump"`。\n'
       + '🔴 掐断报 `reason:"walk-hung"`（服务端不回包，不是路不通）；`digStalled`=挖方块卡在回包上。别原样第三次重叫。\n'
-      + '🔴 **卡住时按执行顺序升**（`planStep`=最后试的那级）：允许挖（`noDig:false`，或自动升级那一遍）时 开门→重算→跳→**挖**→后退→绕行→垫柱；'
+      + '🔴 **卡住时按执行顺序升**（`planStep`=最后试的那级）：允许挖（`allowDig:true`，或自动升级那一遍）时 开门→重算→跳→**挖**→后退→绕行→垫柱；'
       + '不挖的那一遍**没有"挖"这一级**：开门→重算→跳→后退→绕行→垫柱。'
       + '`planTried` 列出真试过哪几级。同目标 90 秒内再叫会**从上次那级接着升**。',
     parameters: {
@@ -4153,7 +4153,7 @@ export function apply(ctx, rawConfig) {
       y: { type: 'number', description: '脚底那格：y=77 站在 76 的方块上，不是 76 那块' },
       z: { type: 'number' },
       mode: { type: 'string', description: 'walk / fly / jump / boat（创造缺省 fly；jump 不需坐标；boat 要先上船；水里自动游，没有 swim）' },
-      noDig: { type: 'boolean', description: '走路时挖不挖方块（**默认不挖**，只绕路；绕不过去会自动改成挖穿再走一遍）；写 false = 第一遍就允许挖，而且**按最短路线挖**（该挖就挖，不再优先绕路）' },
+      allowDig: { type: 'boolean', description: '走路时**允不允许挖**方块（默认 false = 不挖，只绕路；绕不过去会自动改成挖穿再走一遍）；写 true = 第一遍就允许挖，而且**按最短路线挖**（该挖就挖，不再优先绕路）' },
       xz: { type: 'boolean', description: '长程赶路：只给 x/z 就够（按"到那一列"算 GoalXZ）；给了 y 就按 y 走；写 false 等于必须给 y；fly/boat 仍必须给 y' },
       budgetMs: { type: 'number', description: '走路/游泳最长时间（≤10000）' },
       waterRecover: { type: 'boolean', description: '游不动时自动找出口（默认 true）' },
@@ -4166,12 +4166,18 @@ export function apply(ctx, rawConfig) {
     async execute(args, exec) {
       const sess = getSession(exec)
       const mode = String(args.mode ?? '')
-      /* 用户 2026-10-20 定：**默认不挖** —— 走路一格都不挖，非挖不可要显式 `noDig:false`。
+      /* 用户 2026-10-20 定：**默认不挖** —— 走路一格都不挖，非挖不可要显式 `allowDig:true`。
        * 只影响走路那一条：寻路的 `canDig` 关掉，卡住时"挖开台阶"的补救也关掉
        * （见 `src/movement.mjs` 的 `walkPathfinder`）。
-       * 2026-10-25 用户：「删掉」`mode:"walk-nodig"` —— 它跟 `noDig:true` 效果重复，
-       *   唯一区别是硬盖住 `noDig:false`，而默认本来就不挖，留着只会让人多学一个值。 */
-      const noDig = args.noDig !== false
+       * 2026-10-25 用户：「删掉」`mode:"walk-nodig"` —— 它跟"不挖"重复，
+       *   唯一区别是硬盖住"允许挖"，而默认本来就不挖，留着只会让人多学一个值。
+       *
+       * 🔴 2026-10-30 用户：「nodig 改成 allowdig 默认 false」—— 对外参数改名 `allowDig`
+       *   （**正向语义**：true = 允许挖；默认 false = 不挖，和以前的行为完全一致）。
+       *   内部 `walkTo` / `walkPathfinder` 也用同一个 `allowDig`（2026-10-30 一起改名，
+       *   不再有"对外正向、对内反向"两套名字）。这里只负责把**旧字段**翻成新字段 ——
+       *   全仓只有这一行认老名字，`noDig:false` 等价 `allowDig:true`（老剧本/老记忆里写的是它）。 */
+      const allowDig = args.allowDig !== undefined ? args.allowDig === true : args.noDig === false
       if (mode === 'jump') return { ...(await sess.bot.jump()), ...aroundOf(sess) }
       /* 🔴 2026-10-27（用户 m05868：「把 mode swim 去掉」）：这个分支删了。
        *   给坐标那条本来就等于 `walkTo`（人在水里会自动走"直接游"那条，见 movement.mjs 的
@@ -4207,7 +4213,7 @@ export function apply(ctx, rawConfig) {
        *   shaft/briefBlocks/逐级 planTried…）**只进本地日志**，不进模型上下文。 */
       const deaths0 = deathMarkOf(sess)
       const finish = (res) => {
-        const brief = briefMoveOf(res, sess.bot.bot?.entity?.position ?? null)
+        const brief = finiteOnly(briefMoveOf(res, sess.bot.bot?.entity?.position ?? null))
         /* 明细落日志：出问题时翻日志能看到全部字段（原来这些都在返回里）。 */
         try {
           logLine(`mc_move 明细 target=${JSON.stringify(target)} args=${JSON.stringify(args)} → ${JSON.stringify(res)}`)
@@ -4224,8 +4230,13 @@ export function apply(ctx, rawConfig) {
         return finish(withOutcome(await sess.bot.driveBoat(target, { arrive: args.intent === 'stand' ? 1.2 : 2, budget: callBudget(args.budgetMs) }), { expect: 'moved' }))
       }
       if (use !== 'walk') throw new Error(`未知 mode："${use}"（可用 walk / fly / jump / boat）`)
-      /* 2026-10-25：走不通就自动改成「挖穿挡路的方块」再走一次（显式 `noDig:false` 除外）。 */
-      return finish(withOutcome(await walkWithAutoDig(sess, target, { noDig, noTower: args.allowTower !== true, noBridge: args.allowBridge !== true, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }, args.budgetMs, noDig === true), { expect: 'moved' }))
+      /* 2026-10-25：走不通就自动改成「挖穿挡路的方块」再走一次（显式 `allowDig:true` 除外）。
+       * 🔴 2026-11-02 审计：这里以前传的是 `allowDig !== true` ⇒ 用户**显式**写 `allowDig:false`
+       *   也被当成"没给"，走不通就自己改成挖穿 —— 关掉的开关被绕过（和刚删掉的「自动垫柱」同型，
+       *   而且唯一那句"改成挖穿过来的"只在 `hint` 里，模型看不到）。
+       *   现在：只有**压根没给挖开关**才允许这一遍自动挖穿；给了（true/false）就照给的来。 */
+      const digGiven = args.allowDig !== undefined || args.noDig !== undefined
+      return finish(withOutcome(await walkWithAutoDig(sess, target, { allowDig, noTower: args.allowTower !== true, noBridge: args.allowBridge !== true, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }, args.budgetMs, !digGiven), { expect: 'moved' }))
     },
   }))
 
@@ -4545,7 +4556,7 @@ export function apply(ctx, rawConfig) {
   ctx.tools.register(asTool({
     name: 'mc_sequence',
     description: '**按顺序执行一串世界交互**（替代"写脚本"）：适合"走到这里放几个方块，再走到那里放几个"这类连串动作。\n'
-      + 'steps 是数组，每项 op 可为：wait(sec) / move(x,y,z,mode,noDig) / look(x,y,z 或 who) / toward(who) / '
+      + 'steps 是数组，每项 op 可为：wait(sec) / move(x,y,z,mode,allowDig) / look(x,y,z 或 who) / toward(who) / '
       + 'place(x,y,z,name) / break(x,y,z) / dig(name 或 x,y,z,count) / use(x,y,z 或 who) / useitem(hold) / attack(who) / '
       + 'equip(name) / give(name,count) / toss(name,count) / say(text) / jump / swim(x,y,z 或 hold)。\n'
       + '逐步执行，默认遇错即停。\n'
@@ -4673,7 +4684,7 @@ export function apply(ctx, rawConfig) {
         /* 2026-10-23：默认搜索半径 16 → 8。16 格外的矿一律要被走过去，而"走过去"正是
          *   乱挖/垫柱的来源；8 格内的矿基本都在身边，挖起来干脆。远处的先 mc_move 靠近。 */
         maxDistance: args.maxDistance ?? 8, count: args.count,
-        noDig: args.digThrough !== true,
+        allowDig: args.digThrough === true,
         noClear: args.noClear === true,
         /* 🔴 2026-10-20 审计：`allowDangerous` 在上面声明了、`dig()` 也认这个参数，
          *    但这里**从来没传过** —— 于是"带 allowDangerous:true 就能挖脚下"这句

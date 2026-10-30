@@ -844,7 +844,7 @@ section('⑩ interruptMove() —— 自保反射抢 AI 那一步的移动（"动
 
 // ── 收尾：删掉临时目录 ────────────────────────────────────────────────────────
 for (const d of TMP_DIRS) { try { rmSync(d, { recursive: true, force: true }) } catch {} }
-/* 🔴 2026-10-24 用户实机（问题清单第 6 条）：`mc_sequence` 的 move 步骤以前只传 budget/noDig，
+/* 🔴 2026-10-24 用户实机（问题清单第 6 条）：`mc_sequence` 的 move 步骤以前只传 budget 和"挖不挖"那一个开关（当时叫 `noDig`，现 `allowDig`），
  *    把 intent 丢了 ⇒ 步骤里写 `intent:"stand"` 也永远按 near（1.6 格）判到达。 */
 {
   const seqSrc = readFileSync(new URL('../src/sequence.mjs', import.meta.url), 'utf8')

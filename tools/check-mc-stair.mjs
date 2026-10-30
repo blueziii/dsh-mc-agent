@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { stairDirOf, stairDropOf, STAIR_MAX_STEPS, STAIR_STEP_MS, STAIR_WALK_MS, STAIR_MIN_STEP_MS, STAIR_DROP_OK } from '../src/mining.mjs'
+import { stairDirOf, stairDropOf, STAIR_MAX_STEPS, STAIR_WALK_MS, STAIR_MIN_STEP_MS, STAIR_DROP_OK } from '../src/mining.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
@@ -28,7 +28,9 @@ const patchSrc = read('tools/patch-mc-deps.mjs')
 
 section('1. 常量')
 ok(STAIR_MAX_STEPS === 64, '默认最多 64 步')
-ok(STAIR_STEP_MS === 3000, '每走一格最多 3 秒')
+/* 🔴 2026-11-02 审计（#19）：原来钉着 `STAIR_STEP_MS === 3000`，可那常量根本没人读
+ *   （真实每步预算 = `STAIR_WALK_MS`）。断言的应该是"没有那个 3 秒的常量了"。 */
+ok(!/export const STAIR_STEP_MS/.test(mvSrc), '不再有"每走一格 3 秒"的死常量（真实预算见 STAIR_WALK_MS）')
 ok(/export const STAIR_MAX_STEPS/.test(mvSrc), '常量有导出（测试能拿到）')
 
 section('2. 几何：上下都挖 3 格（fy / fy+1 / fy+2）')
@@ -109,10 +111,13 @@ ok(/targetY: Number\.isFinite\(Number\(args\.y\)\) \? Number\(args\.y\) : null,/
 ok(/别指望 mc_move 挖竖井/.test(idxSrc), '描述里点明 move 不再挖竖井')
 ok(/目标 y 比现在低就是往下挖、高就是往上挖/.test(idxSrc), '描述里点明 stair 双向（上/下）')
 
-section('8. vendor 补丁：move 不许挖脚下')
-ok(/move 不挖脚下：getMoveDown/.test(patchSrc), 'patch 脚本有 getMoveDown 补丁')
-ok(/move 不挖脚下：getMoveDropDown/.test(patchSrc), 'patch 脚本有 getMoveDropDown 补丁')
-ok(/if \(toBreak\.length > 0\) return/.test(patchSrc), '两处都是「要挖就不许掉下去」')
+section('8. vendor 补丁：move「挖脚下」改成加价（2026-10-30 用户：「这个改成代价变高，不要禁止」）')
+ok(/move 挖脚下：按挖价乘 3（不禁止）/.test(patchSrc), 'patch 脚本有 getMoveDown 补丁（加价，不禁止）')
+ok(/move 斜下挖：按挖价乘 3（不禁止）/.test(patchSrc), 'patch 脚本有 getMoveDropDown 补丁（加价，不禁止）')
+/* 形态：最多边挖边掉两格 + 代价乘 digDownFactor。判死那版（if (toBreak.length > 0) return）已废 ——
+ * 它让实心柱落差一超 maxDropDown 就永远 NoPath。挖竖井仍归 mc_dig {mode:"stair"}（见第 109 行那条文案）。 */
+ok(/if \(toBreak\.length > 2\) return/.test(patchSrc) && /cost \*= \(Number\.isFinite\(f\) && f > 0\) \? f : 3/.test(patchSrc),
+  '两处都是「最多两格 + 按挖价乘系数」')
 
 section('9. 结果文案')
 ok(/再叫一次 [^ ]{0,3}mc_dig \{mode:"stair", y:/.test(mvSrc), '预算用完时告诉它怎么接着挖')

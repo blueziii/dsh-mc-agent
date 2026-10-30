@@ -570,5 +570,18 @@ section('⑨ 传送门旁边不放方块（用户 2026-10-25 实机：会在框�
   ok(!/throw new Error\(`服务端明确拒绝放置/.test(ps), '明确拒绝也继续重试剩下的次数（不是一次就放弃）')
 }
 
+/* ─────────── 批 C（2026-11-02 审计）：变体归一 / before 别丢 / 抬不到就别放 ─────────── */
+section('🧱 放置确认的三条硬要求（变体、放置前状态、跳跃窗口）')
+{
+  const ps = readFileSync(new URL('../src/place.mjs', import.meta.url), 'utf8')
+  ok(/const chip = \(s2\)/.test(ps) && /const okName = want \? chip\(got\) === want/.test(ps),
+    'confirmPlaced 比的是"同一种方块"：两边都去掉 wall_（火把贴墙变 wall_torch 也算成功）')
+  ok(/before: beforeAt/.test(ps) && /beforeAt = tgt \? \(b\.blockAt\(tgt, false\)\?\.name \?\? null\) : null/.test(ps),
+    '普通放置复核时带上"放置前那格是什么"（否则手里空时判据退化成"非空即成功"）')
+  ok(/const roseAtAll = Number\.isFinite\(bestRise\) && bestRise > 0\.05/.test(ps)
+    && /if \(!reached && roseAtAll && bestRise < needRise - 0\.15\)/.test(ps),
+    '跳不到放置窗口就不发那一次包（差得多先重跳，别白放 + 白等两次复核）')
+}
+
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

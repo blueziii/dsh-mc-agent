@@ -459,7 +459,7 @@ const IRON_DOOR_RE = /^iron_(door|trapdoor)$/
 /**
  * **每挖一格额外记 `perBlock` 步**（默认走 `cfg.walkDigDetourMax` = 15）。
  *
- * 为什么需要：`digFirst`（显式 `noDig:false`）把 `digCost` 压到 0.4 之后，A* 眼里
+ * 为什么需要：`digFirst`（显式 `allowDig:true`）把 `digCost` 压到 0.4 之后，A* 眼里
  * "挖一格"几乎等于"走一步"，于是它选的是**几何最短**——直着挖穿自家墙、把地板刨开。
  * 用户实机原话：「nodig false 最短现在会挖家，ai 也没意识到要切换，设置个绕路最大限制
  * 大于 15 格在挖」。给每格挖加固定的 15 步之后：绕路 ≤15 格 ⇒ 绕；>15 格 ⇒ 才挖。
@@ -476,24 +476,31 @@ export function patchDigDetour (mv, { perBlock = 15 } = {}) {
   if (typeof mv.safeOrBreak === 'function' && !mv.__dshDigDetour) {
     mv.__dshDigDetour = true
     const origSafe = mv.safeOrBreak.bind(mv)
+    /* 🔴 2026-11-02 审计（#13）：`100` 只是上游 `safeOrBreak` 的**哨兵返回值**
+     *   （`safeToBreak()` 失败时 `return 100`），而正常代价是**累计值**
+     *   （`exclusionBreak + (1+3*digTime/1000)*digCost*pen`，黑曜石就已经 100，再加 exclusion 就超了）
+     *   ⇒ 以前 `c >= 100` 把"贵但能挖"当成"挖不了"，那条路直接被判死。
+     *   能不能挖要问 `safeToBreak`，不要拿代价猜。 */
     mv.safeOrBreak = (block, toBreak) => {
       const c = origSafe(block, toBreak)
-      if (c >= 100) return c          // 100 = 挖不了，别动
-      if (block?.safe) return c       // 这格本来就能站，压根没挖
+      const canBreak = typeof mv.safeToBreak === 'function' ? mv.safeToBreak(block) : true
+      if (!canBreak) return c          // 真挖不了（基岩 / 排除区）—— 别动那个 100
+      if (block?.safe) return c        // 这格本来就能站，压根没挖
       return c + add
     }
     const origLabor = typeof mv.breakLabor === 'function' ? mv.breakLabor.bind(mv) : null
     if (origLabor) {
       mv.breakLabor = (block) => {
         const c = origLabor(block)
-        return c >= 100 ? c : c + add
+        const canBreak = typeof mv.safeToBreak === 'function' ? mv.safeToBreak(block) : true
+        return canBreak ? c + add : c
       }
     }
   }
   return mv
 }
 
-export function patchDoorMoves (mv, { digPenalty = 0 } = {}) {
+export function patchDoorMoves (mv, { digPenalty = 0, parkourPenalty = 0 } = {}) {
   if (!mv) return mv
   const doorAt = (node, p) => {
     try { return mv.getBlock?.(node, p.x - node.x, p.y - node.y, p.z - node.z) ?? null } catch { return null }
@@ -513,6 +520,12 @@ export function patchDoorMoves (mv, { digPenalty = 0 } = {}) {
    * 公式照 `movements.js:290-298`（laborCost = (1 + 3*digTime/1000) * digCost）。 */
   const laborOf = (blk) => {
     try {
+      /* 🔴 2026-11-02 审计（#11）：这里以前自己抄了一遍 `(1+3*digTime/1000)*digCost`，
+       *   漏了树叶加价 `dshBreakPenalty`、也漏了 `patchDigDetour` 的每格 +15，
+       *   工具 NBT 附魔/药水效果还是用空数组顶的 ⇒ **退的钱 ≠ 收的钱**：
+       *   门/门框那格退少了，A* 依然觉得"挖门"和"走门"差不多贵，于是继续选墙。
+       *   现在直接调同一个 `mv.breakLabor`（它已被上面的补丁包过）—— 退价与收费天生同源。 */
+      if (typeof mv.breakLabor === 'function') return Number(mv.breakLabor(blk)) || 0
       if (!Number.isFinite(mv.digCost) || typeof blk?.digTime !== 'function') return 0
       const tool = mv.bot?.pathfinder?.bestHarvestTool?.(blk)
       const digTime = blk.digTime(tool?.type ?? null, false, false, false, [], {}) || 0
@@ -569,7 +582,14 @@ export function patchDoorMoves (mv, { digPenalty = 0 } = {}) {
        * 而 `placing` 标志不复位 ⇒ 下一拍读 `placingBlock.y` 抛 TypeError
        * （我们拦住后它停住寻路 ⇒ 表现成"卡在门口、原地不动"）。
        * 门由 `openNearbyDoor`（400ms 探一次、够得着就按）负责开 —— 规划里不需要这一步。 */
-      m.toPlace = m.toPlace.filter((p) => !(p?.useOne && isDoor(doorAt(node, p))))
+      const keptPlace = m.toPlace.filter((p) => !(p?.useOne && isDoor(doorAt(node, p))))
+      if (keptPlace.length !== m.toPlace.length) {
+        /* 🔴 2026-11-02 审计（#12）：删掉门的 `useOne` 之后这些垫料**其实没花掉**，
+         *   可 `remainingBlocks` 还是按原来的 `toPlace.length` 扣的 ⇒ 背包刚好 1 块垫料时，
+         *   1×1 柱子那条边会被误判"料不够"而剪掉（人就被困在坑里）。删几格就还回几格。 */
+        if (Number.isFinite(m.remainingBlocks)) m.remainingBlocks += m.toPlace.length - keptPlace.length
+        m.toPlace = keptPlace
+      }
     }
     /* 🔴 必须显式返回 true：`getNeighbors` 用 `filter((m) => clean(node, m))` 收集候选，
      * 漏了这句 ⇒ 所有 move 都被当成 falsy 丢掉 ⇒ A* 无路 ⇒ 到处 `NoPath` 走不动。 */
@@ -593,6 +613,15 @@ export function patchDoorMoves (mv, { digPenalty = 0 } = {}) {
       if (digPenalty > 0) {
         for (const m of kept) {
           if (Array.isArray(m.toBreak) && m.toBreak.length) m.cost = (Number(m.cost) || 0) + digPenalty
+        }
+      }
+      /* 🔴 2026-10-30：跑酷边（跨 1~2 格空隙）加价。
+       *    vendor `getMoveParkourForward` 的 cost 只有 1~2（`let cost = 1`），
+       *    一开 allowParkour，A* 会为了省两步到处跳；加 `parkourPenalty`（默认 4）之后
+       *    "跨一格沟"≈ 多走 4 步 —— 比绕远便宜、比"没路/掉下去"贵，沟边才会主动规划。 */
+      if (parkourPenalty > 0) {
+        for (const m of kept) {
+          if (m.parkour === true) m.cost = (Number(m.cost) || 0) + parkourPenalty
         }
       }
       return kept
@@ -752,6 +781,14 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
    *    路径出来之后怪再走进通道，A* 不知道 —— 那一半靠 `entityObstacleAhead()` 在卡住时补。 */
   mv.allowEntityDetection = true
   mv.entityCost = 8
+  /* 🔴 2026-10-30（m14028「往上垫有时候会失败，视线会慢慢移动到脚下那格」）：
+   *    发包时朝向是**逐 tick 爬**的（`physics.js:169`，`0.05 * yawSpeed` = 0.15 rad
+   *    ≈ 8.6°/tick，转 90° 要 11 个 tick），而放置/挖掘这类发包操作只等一次发包
+   *    就把 packet 送出去 ⇒ 服务端看到的朝向还在半路。提到 60 ⇒ 一 tick 转 3 rad，
+   *    任何转头一次到位。只影响发包平滑，不影响碰撞/移动方向。 */
+  try {
+    if (b.physics) { b.physics.yawSpeed = 60; b.physics.pitchSpeed = 60 }
+  } catch { /* 没装 physics 插件就跳过 */ }
   /* 门进 `mv.openable`（2026-10-18 晚第二版，用户实机："你屋里我寻路进不去，
    * 我的寻路不会开门，只会硬挖，已经挖了你两块木板"）。
    *
@@ -775,9 +812,19 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
     }
   } catch {}
   mv.canDig = self.cfg.walkCanDig !== false        // 挡路的方块可以挖穿（不然掉坑里出不来）
-  /* 2026-10-31：垫一格按“多绕 N 步”计价（默认 12）。上游默认 1 太便宜 ⇒
-   * `allowTower:true` 时“能跳上去 / 能绕”的地方也一路垫方块。现在只有真没路才垫。 */
-  mv.placeCost = Number(self.cfg.walkTowerCost ?? 4)
+  /* 2026-10-31：垫一格按“多绕 N 步”计价。上游默认 1 太便宜 ⇒ `allowTower:true` 时
+   *   “能跳上去 / 能绕”的地方也一路垫方块。现在只有真没路才垫。
+   * 🔴 2026-11-02 审计（#9）：这里以前就把 `cfg.walkTowerCost ?? 4` 写进 `mv.placeCost` ——
+   *   可紧接着的 `applyProfile()` 会用地形档案**无条件覆盖** `placeCost`，
+   *   于是 `walkTowerCost` 是个**死配置**（用户改了不起任何作用）。
+   *   现在：默认走向地形档案，只有显式配了才覆盖 —— 见 `applyProfile` 后面那段。 */
+  /* 🔴 2026-10-30：往下挖的加价系数（vendor `getMoveDown` / `getMoveDropDown` 里用）。
+   * 见 `tools/patch-mc-deps.mjs` 那条补丁：这两个 move 以前是"要挖就整条判死"，
+   * 导致实心柱落差 > maxDropDown 时永远 NoPath；现在改成按挖价乘这个系数。
+   * 3 是照"竖井 22×3=66 > 阶梯 44"定的 —— 下矿仍走阶梯，柱顶才肯挖。
+   * ⚠️ 没登记进 `core.mjs` 的 DEFAULTS：那个文件已经卡在 1000 行上限，加不进去；
+   *    省略即用 vendor 的 `?? 3`，要走 cfg 直接传 `walkDigDownFactor` 即可。 */
+  mv.digDownFactor = Number(self.cfg?.walkDigDownFactor ?? 3)
   mv.allowSprinting = true
   mv.dontMineUnderFallingBlock = true
   /* 危险方块进寻路黑名单（mc_map 第二轮）：`blocksToAvoid` 决定"这格能不能站"
@@ -805,7 +852,7 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
     mv.dshBreakPenalty = pen
   } catch { /* registry 形状不对就不加价（退化成上游默认） */ }
   /* 🔴 2026-10-27 实机（session-514c21b6，**AI 自己记的账**）：
-   *   「**床没了**：我在家附近用 noDig:false 走动时把 black_bed (-10,79,38) 挖掉，
+   *   「**床没了**：我在家附近用 noDig:false（即 `allowDig:true`）走动时把 black_bed (-10,79,38) 挖掉，
    *     掉落的床 5 分钟后消失 → 重生点失效，要重做一张床」。
    *   那次走路是**上游 A* 在挖**：`CARVE_PROTECTED`（床/箱子/工作台/熔炉/附魔台/信标/
    *   刷怪笼/传送门/矿石…）只拦 DSH 自己的 `carveStepAhead` / `stepUp`（`diggableBlock`），
@@ -856,26 +903,40 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
   // ⚠️ 不能靠清空 `scafoldingBlocks` 来治 —— `remainingBlocks === 0` 会把
   // `getMoveUp`（1×1 柱子）那条路一起剪掉，机器人就爬不出坑了。
   applyProfile(mv, profile)
-  /* 🔴 2026-10-27 用户：「noDig:false 还是优先走现有路线，false 应该直接按最短路线挖」——
+  /* 🔴 2026-11-02 审计（#9）：垫一块的价钱 —— 地形档案给默认（平地 12 / 沟 8 …），
+   *   用户显式配 `walkTowerCost` 时才盖掉它（`null` = 不覆盖，见 core.mjs 默认值）。 */
+  if (self.cfg?.walkTowerCost != null && Number.isFinite(Number(self.cfg.walkTowerCost))) {
+    mv.placeCost = Number(self.cfg.walkTowerCost)
+  }
+  /* 🔴 2026-10-27 用户：「noDig:false 还是优先走现有路线，false 应该直接按最短路线挖」（旧字段名，现 `allowDig:true`）——
    *   `applyProfile` 按地形给的 `digCost` 是 3~8（挖一格石头 ≈ 走 16~44 步，见 `src\terrain.mjs`），
-   *   A* 因此宁可绕远路也不挖。**显式 `noDig:false`（"允许挖"）时就该反过来**：把挖按
+   *   A* 因此宁可绕远路也不挖。**显式 `allowDig:true`（"允许挖"）时就该反过来**：把挖按
    *   "多走一步"计价，让它走最短的那条（该挖就挖），而不是"能不挖就绕"。
    *   ⚠️ 只改成本，不碰 `canDig` / `blocksCantBreak` / `blocksToAvoid` / 岩浆黑名单 ——
    *   安全边界照旧。`cfg.walkDigFirst:false` 可退回"能绕就绕"，`cfg.walkDigFirstCost` 微调。 */
-  const digFirstOn = Boolean(digFirst) && self.cfg?.walkDigFirst !== false
+  /* 2026-10-31：`digFirst` 的开关收归调用方（`movement.mjs` 读 `cfg.walkDigFirst`）——
+   * 这里再判一次 cfg 等于两处开关，`walkDigFirst:false` 时连显式传 true 都失效，难查。 */
+const digFirstOn = digFirst === true
   if (digFirstOn) mv.digCost = Number(self.cfg?.walkDigFirstCost ?? 0.4)
   /* 🔴 2026-10-27（用户：「nodig false 最短现在会挖家，ai 也没意识到要切换，设置个绕路最大
    *   限制大于 15 格在挖」）—— 光压 `digCost` 等于"挖一格 ≈ 走一步"，A* 会挖穿自家墙地板。
    *   每挖一格再记 `walkDigDetourMax`（默认 15）步 ⇒ 绕 15 格以内不挖，超过才挖。 */
   if (digFirstOn) patchDigDetour(mv, { perBlock: Number(self.cfg?.walkDigDetourMax ?? 15) })
   mv.scafoldingBlocks = scaffoldingItemIds(b)      // 背包里能垫的方块（**item id**，见该函数注释）
+  /* 🔴 2026-10-30：搭桥收进 A* 之后，"垫一格"的额外代价（vendor `getMoveForward` 里读）。
+   *    默认 5 ⇒ 走一格 1、垫一格 6+；平地绝不会铺，沟边才比"绕 5 格"划算。
+   *    只有 `mc_move{allowBridge:true}`（`mv.allowBridge`）打开时这条边才生成。 */
+  mv.bridgeCost = Number(self.cfg?.walkBridgeCost ?? 5)
   /* 2026-10-18：门只许"按开"，不许挖；已经开着就别再按（否则等于关回去）。见 `patchDoorMoves`。 */
   /* `preferDoors`（默认开）：给"还要挖方块"的移动加 8 点惩罚 —— 平地挖一格石头本来
    * 就要 ~18 点（`digCost` 4 × (1 + 3×挖掘秒数)），再 +8 基本等于"多绕二十几步"，
    * 有门就走门。用户要挖墙可以显式 `preferDoors:false`，或直接叫 `mc_dig`。 */
   const preferDoors = self.cfg.preferDoors !== false
   /* 门那 8 点惩罚是"有门就走门"用的；挖路优先（digFirst）时它会把"挖一格捷径"又顶回绕路去。 */
-  patchDoorMoves(mv, { digPenalty: (digFirstOn || !preferDoors) ? 0 : Number(self.cfg.doorDigPenalty ?? 8) })
+  patchDoorMoves(mv, {
+    digPenalty: (digFirstOn || !preferDoors) ? 0 : Number(self.cfg.doorDigPenalty ?? 8),
+    parkourPenalty: Number(self.cfg.walkParkourPenalty ?? 4),
+  })
   /* 2026-10-22 用户实机：「现在寻路会踩在岩浆块上掉血」—— 站上去会掉血的地板加点重罚，让它绕开。
    * 为什么光有 `blocksToAvoid` 不够，见 `patchHarmfulFloorMoves` 的注释（那名单管"能不能站"，
    * 而岩浆块是实心的、人站在它上面，脚那格永远是空气 ⇒ 那条路从来就没生效过）。 */
@@ -918,12 +979,30 @@ export function guardDoorActivate (b) {
   b.__doorGuard = true
   b.__autoOpenedDoors = new Map()
   b.activateBlock = async function (blk, ...rest) {
-    const key = blk?.position ? `${Math.floor(blk.position.x)},${Math.floor(blk.position.y)},${Math.floor(blk.position.z)}` : null
-    const at = key ? b.__autoOpenedDoors.get(key) : null
-    if (key && at && Date.now() - at < 12_000) {
-      let open = false
-      try { open = blk.getProperties?.().open === true } catch { open = false }
-      if (open) { b.__autoOpenedDoors.delete(key); return }
+    /* 🔴 2026-11-02 审计（#10）：这里原来是一份**自己写的门判据**，两个毛病：
+     *   ① key 直接取传入那格的整数坐标 —— 可门占上下两格：`openNearbyDoor` 记的是下半格，
+     *      vendor 的 `useOne` 常常传上半格 ⇒ 同一个 key 对不上，守卫等于没生效（门被按回去）；
+     *   ② 状态读不到就 `open = false` ⇒ **"不知道"被当成"关着"**，这和 `doorOpenStateOf()`
+     *      在 movement.mjs 里立的规矩（不知道 ≠ 关着）正好相反。
+     *   现在：上下两半的 key 都试，状态只认 `doorOpenStateOf()` 这一个判据。 */
+    const posOf = blk?.position
+    const keyOf = (p) => (p && Number.isFinite(p.x) && Number.isFinite(p.z))
+      ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` : null
+    const keys = []
+    const k0 = keyOf(posOf)
+    if (k0) {
+      keys.push(k0)
+      let upper = false
+      try { upper = blk.getProperties?.()?.half === 'upper' } catch { upper = false }
+      const kOther = keyOf(upper ? { x: posOf.x, y: posOf.y - 1, z: posOf.z } : { x: posOf.x, y: posOf.y + 1, z: posOf.z })
+      if (kOther) keys.push(kOther)
+    }
+    const at = keys.map((k) => b.__autoOpenedDoors.get(k)).find((t) => Number.isFinite(t)) ?? null
+    if (at && Date.now() - at < 12_000) {
+      const seen = doorOpenStateOf(blk)
+      if (seen === 'open') { for (const k of keys) b.__autoOpenedDoors.delete(k); return }
+      /* 明确关着 = 记录作废，让它按（有人自己关上了）；读不出状态就照常按，不当成关着也不当成开着。 */
+      if (seen === 'closed') for (const k of keys) b.__autoOpenedDoors.delete(k)
     }
     return orig(blk, ...rest)
   }

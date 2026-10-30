@@ -1685,6 +1685,9 @@ export function createAuto ({ registry, logLine = () => {}, workspaceOf = null, 
      *   · 已经在往上冲、离水面不到半格 ⇒ 提前松手，靠惯性出水，别冲过头
      * 不寻路、不叫醒、不动位置，也不需要 AI 先叫 `mc_move`。工具刚调完的 1.2 秒里让开：
      * `mc_move` 的游泳段自己在控 jump，别跟它抢。 */
+    /* 🔴 2026-10-30：把"自动上浮开着没有"挂到 bot 上，给 `src/movement.mjs` 的游泳段读 ——
+     *    它要让 AI 潜到水下时得先知道对面有人一直在往上顶（那时只能提醒，不能替用户关）。 */
+    try { b.__mcAutoFloat = beh.autoFloat !== false } catch { /* 假 bot */ }
     if (beh.autoFloat !== false) {
       /* 🔴 别再拿 `e.isInWater` 或"眼睛那格是不是液体"当开关：前者泡在水柱里是 undefined
        *    （2026-10-08 实机），后者一出水就撒手 ⇒ 上下拉锯。只用水面高度说话。 */

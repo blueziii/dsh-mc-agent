@@ -209,6 +209,13 @@ section('⑦ 工具层接线 —— mc_act{useitem} 与"use 不给目标"都要�
   ok(/export const AIM_SETTLE_MS = 450/.test(useSrc), 'AIM_SETTLE_MS = 450（转头包与交互包之间那一拍）')
   ok(/b\.activateItem\(\)/.test(useSrc), 'world-use.mjs 调了 `b.activateItem()`')
   ok(/b\.deactivateItem\(\)/.test(useSrc), 'world-use.mjs 调了 `b.deactivateItem()`')
+  /* 🔴 2026-11-02 审计（#14）：\`mc_act{toward}\` 以前把 \`walkTo\` 的返回值整条丢掉 ——
+   *    walkTo 不抛错，走不到就回 \`{arrived:false, remaining, hint}\` ⇒ toward 永远报"到了"，
+   *    \`sequence\` 里的 toward 步骤也就永远成功。 */
+  ok(/const w = await self\.walkTo\(eye, \{ arrive: 3, budget: callBudget\(args\.budgetMs\) \}\)\.catch/.test(useSrc),
+    '🔴 toward 不丢 walkTo 的返回（走向玩家没走到时也要如实说）')
+  ok(/arrived: w\.arrived !== false/.test(useSrc), 'toward 把 arrived 带回去')
+
   ok(/ctx\.callLeft \? Number\(ctx\.callLeft\(\)\) : 11_000/.test(useSrc), 'hold 用 `ctx.callLeft()` 钳过（不是裸 3000）')
   ok(/left - 400/.test(useSrc), '按住给松手留了 400ms 余量（否则松手被预算拒掉）')
   ok(/async useItem \(opts = \{\}\) \{/.test(core) && /from '\.\/world-use\.mjs'/.test(core) && /callLeft: \(\) => this\.callLeft\(\)/.test(core),
