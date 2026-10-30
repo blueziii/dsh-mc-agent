@@ -129,7 +129,7 @@ export function lavaExitSearch (b, { feet = null, radius = LAVA_RADIUS, up = LAV
  */
 export async function lavaEscape (self, { floatMs = LAVA_FLOAT_MS, swimMs = LAVA_SWIM_MS } = {}, ctx = {}) {
   const b = self.requireBot()
-  const gen = typeof ctx.beginMove === 'function' ? ctx.beginMove() : ++self._moveGen
+  const gen = typeof ctx.beginMove === 'function' ? ctx.beginMove('lava') : ++self._moveGen
   const t0 = Date.now()
   const start = b?.entity?.position?.clone?.() ?? b?.entity?.position ?? null
   const hp0 = entityHealth(b, b?.entity)

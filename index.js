@@ -4219,7 +4219,11 @@ export function apply(ctx, rawConfig) {
           logLine(`mc_move 明细 target=${JSON.stringify(target)} args=${JSON.stringify(args)} → ${JSON.stringify(res)}`)
         } catch { /* 日志写不进去不影响结果 */ }
         const died = deathMarkOf(sess) > deaths0
-        return { ...brief, ...(died ? deathNoteOf(sess) : {}), text: briefMoveTextOf(brief) + (died ? deathLineOf(sess) : '') }
+        /* 🔴 2026-11-03 用户实机日志里又出现 `mc_move returned invalid output: value is not lossless JSON`：
+         *   `brief` 过了 finiteOnly，可后面拼进来的 deathNote / text 没管 ⇒ 只要死亡那一刻的某个数
+         *   是 NaN/Infinity（坐标读不到、血量未知），整条返回就整个作废（模型什么都拿不到）。
+         *   出口整体再套一遍 finiteOnly（它对数组/对象递归，非有限数换 null）。 */
+        return finiteOnly({ ...brief, ...(died ? deathNoteOf(sess) : {}), text: briefMoveTextOf(brief) + (died ? deathLineOf(sess) : '') })
       }
       if (use === 'fly') {
         if (wantsXZ) throw new Error('fly 是三维直飞，必须给 y（xz:true 只对 walk 有效）')
@@ -4466,7 +4470,11 @@ export function apply(ctx, rawConfig) {
     async execute(args, exec) {
       const sess = getSession(exec)
       const bot = sess.bot
-      return withOutcome({ ...(await bot.attack(args)), ...bossBarsField(bot) })
+      /* 🔴 2026-11-02 实机：`mc_attack` 直接返回 `invalid output: value is not lossless JSON`
+       *   —— 那条恰好是目标消失的那次，`distOf()` 的 catch 给的是 `Infinity`，
+       *   而 DSH 的结果要过「无损 JSON」校验 ⇒ **整条正常提示全丢**，模型只收到一句 Error。
+       *   和 `mc_move` 一样过一遍 `finiteOnly`（NaN/Infinity 换 null，渲染层显示 ?）。 */
+      return withOutcome(finiteOnly({ ...(await bot.attack(args)), ...bossBarsField(bot) }))
     },
   }))
 

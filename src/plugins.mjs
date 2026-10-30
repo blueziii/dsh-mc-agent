@@ -25,6 +25,7 @@ import { applyProfile, classifyTerrainCached, profileFor } from './terrain.mjs'
 import { avoidBlockIds, treeBlockIds } from './bridge.mjs'
 import { PLANT_PASSABLE } from './block-names.mjs'
 import { inLavaNow } from './world-observer.mjs'
+import { shouldDodgeEntity } from './entity-avoid.mjs'
 /* 门的判断/去重/冷却只有一份（`src/movement.mjs`）：上半格可能没有 `open` 属性，
  * 必须统一下半块判断；两处各写一份就会各按一次（踩坑 #175/#176）。 */
 import { CARVE_PROTECTED, DOOR_PRESS_COOL_MS, doorBaseKey, doorFaceOf, doorOpenStateOf } from './movement.mjs'
@@ -500,7 +501,7 @@ export function patchDigDetour (mv, { perBlock = 15 } = {}) {
   return mv
 }
 
-export function patchDoorMoves (mv, { digPenalty = 0, parkourPenalty = 0 } = {}) {
+export function patchDoorMoves (mv, { digPenalty = 0, parkourPenalty = 0, digDirTax = 0 } = {}) {
   if (!mv) return mv
   const doorAt = (node, p) => {
     try { return mv.getBlock?.(node, p.x - node.x, p.y - node.y, p.z - node.z) ?? null } catch { return null }
@@ -622,6 +623,20 @@ export function patchDoorMoves (mv, { digPenalty = 0, parkourPenalty = 0 } = {})
       if (parkourPenalty > 0) {
         for (const m of kept) {
           if (m.parkour === true) m.cost = (Number(m.cost) || 0) + parkourPenalty
+        }
+      }
+      /* 🔴 2026-11-02 用户：「只用 allowDig 上地表，它会乱挖」——
+       *    `allowDig:true` 只松 `canDig`，A* 就把"挖一格"当成一条普通边，
+       *    在三维里挑最便宜的挖法：横着掏、往下掏、斜着掏，出来坑坑洼洼。
+       *    这里加"方向税"：向上挖原价（上升本来就得靠挖），水平 +2 份、向下 +5 份。
+       *    一份 = `walkDigSideTax`（默认 15 步 ≈ 挖一格石头的工钱）⇒ 横着挖多花 30 步、
+       *    往下多花 75 步，有竖井/楼梯就走；真没路时仍然会挖（只是贵），不会变 NoPath。 */
+      if (digDirTax > 0) {
+        for (const m of kept) {
+          if (!Array.isArray(m.toBreak) || !m.toBreak.length) continue
+          const dyDir = Number(m.y) - Number(node.y)
+          if (!Number.isFinite(dyDir) || dyDir > 0) continue
+          m.cost = (Number(m.cost) || 0) + digDirTax * (dyDir < 0 ? 5 : 2)
         }
       }
       return kept
@@ -762,7 +777,7 @@ export function patchPlantPassable (mv, b) {
   return added
 }
 
-export function movements (self, { terrain = null, digFirst = false } = {}) {
+export function movements (self, { terrain = null, digFirst = false, allowDig = false } = {}) {
   const b = self.bot
   const { Movements } = self._pf ?? {}
   if (typeof Movements !== 'function') return null
@@ -781,6 +796,36 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
    *    路径出来之后怪再走进通道，A* 不知道 —— 那一半靠 `entityObstacleAhead()` 在卡住时补。 */
   mv.allowEntityDetection = true
   mv.entityCost = 8
+  /* 🔴 2026-11-03 用户（原文）：「不要抛错，直接绕过去。敌对和末影龙都不要」「不要不动和遇到停住」。
+   *    光靠 `entityCost` 不够 —— vendor 只在**生成节点那一刻**按当时实体位置算（`lib/movements.js` 9 处），
+   *    路径定好之后怪再走进通道，A* 完全不知道，执行层就只能顶着走、被卡住、然后收工。
+   *    所以再挂一条**每次重算都现算**的禁行区：把实体现在占着的格子按 60/格计费
+   *    （≈ 多绕 60 步，抵得过任何绕远），于是「怪站在唯一通道里」也会被推着从它旁边挤过去。
+   *    `exclusionAreasStep` 是 vendor `lib/movements.js:99-132` 的函数数组，返回权重累加。 */
+  mv.exclusionAreasStep = [
+    (blk) => {
+      try {
+        const es = b.entities
+        if (!es || !blk?.position) return 0
+        const px = blk.position.x + 0.5
+        const py = blk.position.y
+        const pz = blk.position.z + 0.5
+        let n = 0
+        for (const k in es) {
+          const e2 = es[k]
+          if (!e2 || e2 === b.entity || !e2.position) continue
+          if (!shouldDodgeEntity(e2)) continue
+          const q = e2.position
+          /* 实体占的格 = 脚那一格 + 它高度覆盖到的格（末影人 3 格高、玩家 2 格）。 */
+          const span = Math.max(1, Math.ceil(Number(e2.height) || 1.8))
+          if (Math.abs(q.x - px) >= 0.9 || Math.abs(q.z - pz) >= 0.9) continue
+          if (py < Math.floor(q.y) - 0.2 || py > Math.floor(q.y) + span - 1 + 0.2) continue
+          n++
+        }
+        return n * 60
+      } catch { return 0 }
+    }
+  ]
   /* 🔴 2026-10-30（m14028「往上垫有时候会失败，视线会慢慢移动到脚下那格」）：
    *    发包时朝向是**逐 tick 爬**的（`physics.js:169`，`0.05 * yawSpeed` = 0.15 rad
    *    ≈ 8.6°/tick，转 90° 要 11 个 tick），而放置/挖掘这类发包操作只等一次发包
@@ -936,6 +981,8 @@ const digFirstOn = digFirst === true
   patchDoorMoves(mv, {
     digPenalty: (digFirstOn || !preferDoors) ? 0 : Number(self.cfg.doorDigPenalty ?? 8),
     parkourPenalty: Number(self.cfg.walkParkourPenalty ?? 4),
+    /* 只有"允许挖"那趟才收方向税；不许挖那趟压根没有 toBreak 边，收了也没意义。 */
+    digDirTax: allowDig === true ? Number(self.cfg.walkDigSideTax ?? 15) : 0,
   })
   /* 2026-10-22 用户实机：「现在寻路会踩在岩浆块上掉血」—— 站上去会掉血的地板加点重罚，让它绕开。
    * 为什么光有 `blocksToAvoid` 不够，见 `patchHarmfulFloorMoves` 的注释（那名单管"能不能站"，

@@ -301,7 +301,7 @@ const buildSrc = stripComments(await (await import('node:fs/promises')).readFile
     'dig-guard 有 collectBusy / cancelCollect（停掉后台采集任务）')
   ok(/export async function waitGrounded \(b, \{ maxMs = 1_200, signal = null \} = \{\}\) \{/.test(dgSrc), 'dig-guard 有 waitGrounded（空中挖慢 5 倍）')
   ok(/from '\.\/dig-guard\.mjs'/.test(coreSrc), 'core 确实从 dig-guard.mjs 导入（别只搬不接）')
-  ok(/bumpGen: \(\) => \{ this\._moveGen\+\+ \}/.test(coreSrc), '薄包装把移动代号推进去（模块不碰 this）')
+  ok(/bumpGen: \(who\) => \{ this\._moveGen\+\+; if \(who\) this\._moveGenWho = String\(who\) \}/.test(coreSrc), '薄包装把移动代号推进去（模块不碰 this；带 who 便于追查谁抢的）')
   ok(!/const cap = budgetMs == null/.test(coreSrc) && !/#collectBusy \(b\) \{\r?\n\s+try \{ return Boolean\(b\?\.collectBlock/.test(coreSrc) &&
     !/#waitGrounded \(b, maxMs = 1_200\) \{\r?\n\s+const ent = b\?\.entity/.test(coreSrc) && !/#withHeld \(out, b, before\) \{\r?\n\s+const held = heldText\(b\)/.test(coreSrc),
     'core 里没有残留的旧私有方法体（只剩薄包装）')

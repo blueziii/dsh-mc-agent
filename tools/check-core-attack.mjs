@@ -1593,5 +1593,36 @@ ok(/swings: mySwings, pvpSwings/.test(atkSrc2),
 ok(/const mv1 = await ctx\.moveTo\(/.test(atkSrc2) && /mv1\.arrived !== true/.test(atkSrc2),
   '走不动时把 walkTo 返回的 hint 带出来（它不抛异常，旧写法永远写「原因不明」）')
 
+
+/* ─────────── ⑩ 追击守护 + 出口护栏（用户 m15348：「打到一下以后，不会追着打」）──────────── */
+section('⑩ 追还是 pvp 的，但它停了要有人叫醒；出口不许把 Infinity/NaN 漏出去')
+
+ok(/b\.pvp\.movements = b\.pathfinder\.movements/.test(atkSrc2),
+  'pvp 用**我们这份** Movements（它默认会 new 一份，把门/垫柱/挖/避让全顶掉）')
+ok(/const lost = !b\.pvp\?\.target/.test(atkSrc2) && /await chaseAgain\(\)/.test(atkSrc2),
+  '够不着时每一拍查 vendor 还认不认这个 target —— 它掉了就重新发起追击')
+ok(/Math\.hypot\(p3\.x - chasePos\.x, p3\.z - chasePos\.z\) < 0\.25/.test(atkSrc2) && />= 700/.test(atkSrc2),
+  '人 700ms 没挪也算"它停了"（NoPath 后 vendor 不会自己起来）')
+ok(/const CHASE_MAX = 30/.test(atkSrc2) && /chaseResets >= CHASE_MAX/.test(atkSrc2),
+  '重设次数有上限，追不上就如实报（不许死循环）')
+ok(/chaseResets/.test(atkSrc2) && /人一直在原地/.test(atkSrc2),
+  '结果里带 chaseResets，追不上时说清是"人一直在原地"')
+
+/* 出口护栏：index.js 的 mc_attack 必须过 finiteOnly（否则 distOf 兜底的 Infinity 会让整条结果作废） */
+{
+  const idx = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const iAtk = idx.indexOf("name: 'mc_attack'")
+  const seg = idx.slice(iAtk, iAtk + 2000)
+  ok(/withOutcome\(finiteOnly\(\{ \.\.\.\(await bot\.attack\(args\)\)/.test(seg),
+    'mc_attack 出口过 finiteOnly（NaN/Infinity ⇒ null，不再整条 invalid output）')
+}
+
+ok(/chaseResets >= 3 && dd > 4\.0/.test(atkSrc2) && /await ctx\.moveTo\(pt, \{ arrive: 1\.0/.test(atkSrc2),
+  'pvp 追不动（重设 3 次仍 > 4 格）⇒ 切回我们自己的 walkTo 走一段（前半段我们走、后半段 pvp 贴）')
+
+/* 注：追击重设是**时序行为**（取决于真 pvp 的 target 字段与真寻路），假 bot 里没有那套状态机，
+ * 用行为用例只会写出"恰好今天能过"的断言 ⇒ 这里只钉源码契约（上面那几条）。
+ * 真机表现靠 chaseResets 字段 + 追不上的 note 自查。 */
+
 console.log(`\ncheck-core-attack：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

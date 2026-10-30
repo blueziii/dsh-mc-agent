@@ -230,6 +230,27 @@ section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做
   }
 }
 
+/* 🔴 2026-11-03 用户（m15787）：「那如果垫 4 格后走到另一格能直接垫到地表呢」——
+ *    他要的是 A* 自己逐格比价（原地垫 / 挪一格再垫 / 绕远），而不是被一个"贵"字判死。
+ *    以前 `getMoveUp` 里 `cost += safeOrBreak(block2)` 之后紧跟 `if (cost > 100) return`：
+ *    头顶深板岩挖一格 ≈85 + 垫料 12 就 97，再算挖脚下直接 >100 ⇒ 这条边被丢，
+ *    A* 只能横走、走到"头顶恰好没堵"的格才垫 ⇒ 表现为"到处垫、不成一列"。
+ *    重装 vendor 后要重打：node tools/patch-mc-deps.mjs */
+{
+  const mvSrc2 = readFileSync(join(VN, 'mineflayer-pathfinder', 'lib', 'movements.js'), 'utf8')
+  const i0 = mvSrc2.indexOf('getMoveUp (node, neighbors)')
+  const i1 = mvSrc2.indexOf('// Jump up, down or forward over a 1 block gap')
+  const up = i0 >= 0 && i1 > i0 ? mvSrc2.slice(i0, i1) : ''
+  ok(up.length > 200, '找得到 getMoveUp 本体（vendor 结构变了就要跟着改）')
+  ok(!/cost > 100\) return/.test(up),
+    '★ 垫柱边不再被「cost > 100」一票否决（头顶要挖 ≠ 走不通）')
+  ok(/block2\.boundingBox !== 'empty' && !block2\.liquid && !this\.safeToBreak\(block2\)\) return/.test(up),
+    '头顶是真挖不动（基岩/保护格/容器）才 return —— 判据是「能不能挖」，不是「贵不贵」')
+  ok(/cost > 1000\) return/.test(up),
+    '末尾仍留一个「贵到没意义」的上限（1000 ≈ 绕 1000 步，别让 A* 去探天价路径）')
+  ok(/toPlace\.push\(\{ x: node\.x, y: node\.y - 1, z: node\.z/.test(up),
+    '垂直垫一格仍是唯一那条垫柱边（斜垫 2026-10-29 就禁了，别偷偷回来）')
+}
 /* 2026-10-30 实机（目标 (16,63,88)、一步没挪就报“四周全是实心方块”）：
  *   vendor 的 setGoal 无条件 resetPath('goal_updated')，而 goal_updated 不在 RESUMABLE_RESETS 里
  *   ⇒ stopPathing 为真时直接 stop()、goto 被 reject，我们就当“路线作废”收工；

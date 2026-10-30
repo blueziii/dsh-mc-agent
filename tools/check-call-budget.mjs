@@ -576,7 +576,7 @@ section('⑨ core.mjs —— 长动作排 deadline 要算上"本轮已用掉的�
   ok(/const cutByCall = Boolean\(e\?\.mcCallOver\) \|\| self\.msLeft\(\) <= 400/.test(movSrc)
     && /const timeUp = cutByCall \|\| Boolean\(e\?\.mcTimeout\)/.test(movSrc), '被预算截断 ≠ 走不通（文案分流，实现已搬到 src\\movement.mjs）')
   ok(/from '\.\/movement\.mjs'/.test(src), 'core 确实从 movement.mjs 导入（搬走 + 忘接 = 假绿）')
-  ok(/bumpGen: \(\) => \{ this\._moveGen\+\+ \}/.test(src), '薄包装里把移动代号往前推（模块不碰 this）')
+  ok(/bumpGen: \(who\) => \{ this\._moveGen\+\+; if \(who\) this\._moveGenWho = String\(who\) \}/.test(src), '薄包装里把移动代号往前推（模块不碰 this；带 who）')
   ok(/callLeft \(\) \{/.test(src), 'McBot 上有 callLeft() = min(一整轮, 本轮剩余)')
   ok(!/const deadline = callDeadline\(\)/.test(src), '没有"又给整整一整轮"的 `const deadline = callDeadline()`')
   ok(!/msLeft\(\) \|\| CALL_BUDGET_MS/.test(src), '没有 `msLeft() || CALL_BUDGET_MS`（用完了 0 会变成 10000）')
@@ -617,11 +617,11 @@ section('⑩ interruptMove() —— 自保反射抢 AI 那一步的移动（"动
   const movSrc = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   ok(/_moveGen = 0/.test(src), '有移动代号 _moveGen（每次移动领一个号）')
-  ok(/#beginMove \(\) \{ return \+\+this\._moveGen \}/.test(src), '#beginMove() 领号')
+  ok(/#beginMove \(who = null\) \{ if \(who\) this\._moveGenWho = String\(who\); return \+\+this\._moveGen \}/.test(src), '#beginMove(who) 领号并记来源')
   ok(/async interruptMove \(reason = ''\)/.test(src), 'interruptMove(reason = "") 是公开方法')
   const bumps = [...src.matchAll(/this\._moveGen\+\+/g)].length + [...runSrc.matchAll(/self\._moveGen\+\+/g)].length
   ok(bumps >= 2, `抢占时把代号往前推（${bumps} 处：interruptMove / #cancelCollect）`, String(bumps))
-  const begins = [...src.matchAll(/this\.#beginMove\(\)/g)].length
+  const begins = [...src.matchAll(/this\.#beginMove\(/g)].length
   ok(begins >= 3, `走路 / 采集 / 游泳各领一次号（${begins} 处：#walkPathfinder / dig / #walkSwim）`, String(begins))
   ok(/const preempted = self\._moveGen !== gen/.test(movSrc), '收尾时先判断"我这一号还是不是最新的"（实现在 src\\movement.mjs）')
   ok(/const reasonOut = preempted \? 'preempted'/.test(movSrc) && /reason: reasonOut/.test(movSrc),

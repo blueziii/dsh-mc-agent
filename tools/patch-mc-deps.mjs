@@ -690,6 +690,50 @@ repIn(
   'breakLabor 按类型加价（树叶）'
 )
 
+/* ── 2026-11-03：往上垫柱不再因为"贵"被否掉 ───────────────────
+ * 用户原话（m15787）：「那如果垫4格后走到另一格能直接垫到地表呢」——
+ * 他点出"先竖着垫到目标高度"是死板做法，真正该由 A* 每步比较
+ * 「原地垫一格 / 挪一格再垫 / 绕远」。A* 现在选不对，是因为下面两行把
+ * "头顶要挖"的情况当成不可行：`cost += this.safeOrBreak(block2, toBreak)` 之后
+ * `if (cost > 100) return`，而 `100` 是 upstream 的"不安全"哨兵、`cost` 却是累计值 ——
+ * 头顶深板岩挖一格 ≈ 85，加垫料 12 就 97，再算挖脚下那格直接 >100 ⇒ 这条边被丢掉，
+ * A* 只能横着走，走到"头顶恰好没堵"的格才垫 ⇒ 表现为"到处垫、不成一列"。
+ * 改法：按**能不能挖**判死（空 / 液体 / safeToBreak 即可行），贵不贵交给 A* 比价；
+ * 最后那道总的 `cost > 100` 抬到 1000（≈ 绕 1000 步，真贵到没意义时仍会被弃）。
+ * ⚠️ 与 0.6.72 #13（`c >= 100` 一出口两件事）是同一类错误。 */
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `    cost += this.safeOrBreak(block2, toBreak)
+    if (cost > 100) return
+
+    if (!block1.climbable) {`,
+  `    cost += this.safeOrBreak(block2, toBreak)
+    /* 🔴 2026-11-03 DSH 补丁：头顶这两格"贵"不等于"走不通" —— 只剩真挖不动才判死。 */
+    if (block2.boundingBox !== 'empty' && !block2.liquid && !this.safeToBreak(block2)) return
+
+    if (!block1.climbable) {`,
+  '垫柱：头顶可挖就别按 100 判死（getMoveUp 头部）'
+)
+
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `    if (cost > 100) return
+
+    neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
+  }
+
+  // Jump up, down or forward over a 1 block gap`,
+  `    /* 🔴 2026-11-03 DSH 补丁：同上 —— 挖脚下那格贵（深板岩 85）不等于这条路不存在。
+     *    留 1000 当"贵到没意义"的上限，别拿 100 误杀。 */
+    if (cost > 1000) return
+
+    neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
+  }
+
+  // Jump up, down or forward over a 1 block gap`,
+  '垫柱：整条边的 100 上限抬到 1000（getMoveUp 末尾）'
+)
+
 /* ── 其它补丁只做存在性检查（改法在踩坑档案里，不在这里重放） ───────────── */
 console.log('\n其它已知补丁（只检查）：')
 const checks = [

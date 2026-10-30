@@ -1207,10 +1207,18 @@ export function createAuto ({ registry, logLine = () => {}, workspaceOf = null, 
         return list.some((a) => /mc_move|auto:water|mc_sequence/.test(String(a?.name ?? '')))
       } catch { return false }
     })()
-    const stopped = (fallOnly || (drownOnly && movingNow) || cfg.dangerStopWork === false) ? null : stopWork(s, sess)
+    /* 🔴 2026-11-03 用户：「mc_move 报'被打断'，怎么还是被打断」。查下来最常见的打断源就是这里：
+     *   只要附近有怪/挨了一下，自保叫醒就 `interruptMove()` 推号 ⇒ 正在走的 mc_move 立刻
+     *   变 `preempted`，AI 只能重发、从头再来（往上挖的进度全丢）。
+     *   和摔伤、憋气同一条道理：**AI 已经有移动在跑时，打断的代价比收益大** ——
+     *   它多半正在逃/正在爬；不打断也能叫醒它（消息照发，决策权还在 AI）。
+     *   没有移动在跑（比如正在挖、正在站着）时照旧停手。 */
+    const threatMoving = threat === true && movingNow
+    const stopped = (fallOnly || threatMoving || (drownOnly && movingNow) || cfg.dangerStopWork === false) ? null : stopWork(s, sess)
     const stopLine = stopped !== null
       ? `⏸ 我已经先把手里的活停下了（寻路 / 采集 / 控制位都松开了${stopped}）—— 现在你说了算。`
-      : (drownOnly && movingNow ? '⏳ 我**没有**打断你正在做的移动 —— 你在上浮/游动，接着游，别停。' : '')
+      : (drownOnly && movingNow ? '⏳ 我**没有**打断你正在做的移动 —— 你在上浮/游动，接着游，别停。'
+        : (threatMoving ? '⏳ 我**没有**打断正在走的移动（打断只会让这趟白走）—— 你先决定是接着走还是打。' : ''))
     /* 🔴 2026-10-23 审计（战斗层报告 C[4]）：踩到岩浆/火/仙人掌以前**只 pushAutoEvent**、
      *    不叫醒 AI —— 要等空闲那一次叫醒，而空闲叫醒和它共用一份配额、120 秒就过期。
      *    现在给它一条专属报法（仍然只叫醒，不替 AI 移动）。 */

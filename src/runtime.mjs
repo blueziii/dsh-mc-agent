@@ -146,6 +146,8 @@ export function stopPathing (b) {
 export async function interruptMove (self, reason = '', ctx = {}) {
   const b = self.bot
   self._moveGen++                                    // 在飞的那次走路从此不许再碰控制位
+  /* 2026-11-03：被打断时要点名「是谁抢的」—— 这里是**自保反射**那条路。 */
+  self._moveGenWho = `emergency${reason ? ':' + reason : ''}`
   try { stopPathing(b) } catch {}
   try { await ctx.cancelCollect?.(b) } catch {}       // 采集任务也按着 forward，一起停掉
   ctx.releaseControls?.()

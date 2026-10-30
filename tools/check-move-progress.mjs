@@ -2319,8 +2319,8 @@ section('㉓ 执行顺序：先便宜的、能绕就别挖；跨调用接着升�
   const mvSrc = strip(read('../src/movement.mjs'))
   ok(!/export (?:function movePlanFor|const MOVE_PLAN\b|const MOVE_PLAN_NODIG\b)/.test(mvSrc),
     '🔴 只留一份执行顺序表（曾经的第二份 `MOVE_PLAN` 让日志级号对不上实际阶梯）')
-  ok(/if \(e2 && shouldWaitEntity\(e2\)\)/.test(mvSrc) && !/!shouldWaitEntity\(e2\)/.test(mvSrc),
-    '🔴 走的过程中的实体扫描：被动的才停（`shouldWaitEntity` 的语义是"值得等"，取反会变成只对敌对停）')
+  ok(/if \(!entityDodgeOff && e2 && shouldDodgeEntity\(e2\)\)/.test(mvSrc) && !/shouldWaitEntity\(e2\)/.test(mvSrc),
+    '🔴 走的过程中遇到活物 ⇒ 换一条路，不停也不收工（2026-11-03 用户「不要不动和遇到停住」；旧写法分敌友、还要站着等 900ms）')
   ok(MOVE_ESCAPES_DIG.indexOf('breakAhead') < MOVE_ESCAPES_DIG.indexOf('detour'),
     '🔴 允许挖时"挖"排在绕行之前（能挖就别绕远路）', MOVE_ESCAPES_DIG.join(' → '))
   ok(planStepTextOf('detour') === '侧向绕行' && planStepTextOf('climbUp') === '往上挖一层再跳',
@@ -2487,9 +2487,35 @@ section('㉕ 2026-10-24 局部运动层：一格台阶先踩上去，别把台�
   ok(g1?.kind === 'step' && g1?.canStandOnTop === false, '台阶顶部上方被堵 ⇒ 净空不足', JSON.stringify(g1))
   ok(g1?.ceiling?.name === 'stone', '并且指出是哪一块堵着（好决定挖哪格）')
 
-  /* 两格高 ⇒ 是墙，不是台阶 */
+  /* 🔴 2026-11-03 实机（用户：「move 里 allowDig 的挖台阶不会挖头顶方块，而且没有跳上挖上去的台阶」）：
+   *   脚层 + 头层实心、**再上面一格是空的** ⇒ 这不是"两格厚的墙"，而是"一格台阶 + 站上去顶头"：
+   *   该挖的是头层那格，挖完就是普通台阶，接着跳上去。旧断言一律当墙 ⇒ 一格不挖、也不跳。 */
   const g2 = mod.stepGeometryOf(mkCarveBot({ '1,64,0': 'stone', '1,65,0': 'stone' }), { x: 1, y: 64, z: 0 })
-  ok(g2?.kind === 'wall', '前方两格高 ⇒ 是墙不是台阶（别当台阶处理）', JSON.stringify(g2))
+  ok(g2?.kind === 'step', '脚+头实心、再上面空 ⇒ 认成台阶（挖头顶再跳），不是墙', JSON.stringify(g2))
+  ok(g2?.ceiling?.y === 65, '并且指明该挖的是**头层那格**（y=65），不是脚下的台阶', JSON.stringify(g2.ceiling))
+
+  /* 三格全实心 ⇒ 真·两格厚的墙，不归台阶管 */
+  const g2b = mod.stepGeometryOf(mkCarveBot({ '1,64,0': 'stone', '1,65,0': 'stone', '1,66,0': 'stone' }), { x: 1, y: 64, z: 0 })
+  ok(g2b?.kind === 'wall', '三格全实心 ⇒ 真两格厚的墙', JSON.stringify(g2b))
+  /* 🔴 2026-11-03 用户实机：`前方 54,104,31 的脚下是 stone（没有两格高）`，allowDig:true 也停在
+   *   那儿一动不动（同一条路三条日志只挪 2.7 格）。三格全实心时旧代码直接报 wall 收工 ——
+   *   其实是两张方块厚的台阶，挖掉头层 + 再上面那格就能站上去。 */
+  ok(g2b?.above && g2b.above.y === 66, 'wall 也要带出"再上面那格"的坐标（不然不知道挖到哪一层）', JSON.stringify(g2b?.above))
+  ok(/if \(geo\.kind === 'wall'\) \{[\s\S]{0,400}?if \(!allowDig\) return \{ tried: true, ok: false, why: 'wall'/.test(src),
+    'allowDig:false 时仍然如实报 wall（不挖就一格不动）')
+  ok(/if \(!\(await digAt\(geo\.above\.x, geo\.above\.y, geo\.above\.z\)\)\)/.test(src),
+    'allowDig:true 时挖掉头层后接着挖再上面那格（两张方块厚的台阶）')
+  ok(/const digAt = async \(cx, cy, cz\) => \{/.test(src) && !/const okDig = await \(\(\) => \{/.test(src),
+    '挖一格抽成 digAt（换工具 + 超时 + 挖不动都算失败），不再内联一份')
+
+  /* 行为：允许挖时，挖的是头顶那格，台阶块本身不动，挖完往上一跳 */
+  {
+    const bH = mkCarveBot({ '1,64,0': 'stone', '1,65,0': 'stone' })
+    const rH = await mod.stepUp(bH, { x: 1, y: 64, z: 0 }, { allowDig: true, ms: 40 })
+    ok(bH.dug.includes('1,65,0'), '🔴 挖掉了头顶那格', JSON.stringify(bH.dug))
+    ok(!bH.dug.includes('1,64,0'), '🔴 台阶块本身没挖（挖了就是削平楼梯）')
+    ok(rH?.dug === 1, '结果里报挖了 1 格', JSON.stringify(rH))
+  }
 
   /* 不挖 + 净空不足 ⇒ 如实报 blocked，一格都不动 */
   const bNo = mkCarveBot({ '1,64,0': 'stone', '1,66,0': 'stone' })
@@ -2654,8 +2680,8 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
   /* 手挖石头 1.5 秒：laborCost = (1 + 3×1.5) × 0.4 ≈ 2.2 步 ⇒ 比"多绕三格"便宜。 */
   ok((1 + 3 * 1.5) * D2.walkDigFirstCost < 3, '手挖一格石头 ≲ 走三格（绕路不再稳赢）')
   const plug2 = readFileSync(new URL('../src/plugins.mjs', import.meta.url), 'utf8')
-  ok(/export function movements \(self, \{ terrain = null, digFirst = false \} = \{\}\)/.test(plug2),
-    'movements() 收 digFirst')
+  ok(/export function movements \(self, \{ terrain = null, digFirst = false, allowDig = false \} = \{\}\)/.test(plug2),
+    'movements() 收 digFirst + allowDig')
   ok(/const digFirstOn = digFirst === true/.test(plug2),
     'plugins 只认传进来的参数（开关只在 movement.mjs 一处，不再两处都判）')
   ok(/if \(digFirstOn\) mv\.digCost = Number\(self\.cfg\?\.walkDigFirstCost \?\? 0\.4\)/.test(plug2),
@@ -2666,15 +2692,46 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
     && !/const digFirst = allowDig === true/.test(mv2),
     'digFirst 只由 cfg.walkDigFirst 开，`allowDig:true` 不再顺带打开')
   /* 2026-11-02：第三处（垫柱兜底那段）随自动垫柱一起删了 —— 现在是两处。 */
-  ok((mv2.match(/ctx\.movements\(terrain, \{ digFirst \}\)/g) || []).length === 2,
-    '两处建 Movements（主 / 地形重估）都带上 digFirst（垫柱兜底那处已删）')
+  ok((mv2.match(/ctx\.movements\(terrain, \{ digFirst, allowDig \}\)/g) || []).length === 2,
+    '两处建 Movements（主 / 地形重估）都带上 digFirst + allowDig（垫柱兜底那处已删）')
   /* 2026-10-31：目标在头顶/脚下、A* 说"到了"却没到那个高度时，往下/往上动作要真的被叫到
    * （以前只认 `emptyNoPath` ⇒ 这种情况一次都没试过，直接报"先走到同一层"）。 */
   ok(/let vertStuck = false/.test(mv2) && /if \(Math\.abs\(dyR\) > 1\.5 && horizR <= arriveUsed \+ 1\.0\) vertStuck = true/.test(mv2),
     '"到了但差层"会被识别成垂直方向没路（vertStuck）')
   ok(/if \(\(emptyNoPath \|\| vertStuck\) && carveNoPathOk && downTries < MOVE_DOWN_TRIES/.test(mv2)
-    && /if \(\(emptyNoPath \|\| vertStuck\) && carveNoPathOk && upTries < MOVE_UP_TRIES/.test(mv2),
+    && /if \(\(emptyNoPath \|\| vertStuck \|\| upFirst\) && carveNoPathOk && upTries < MOVE_UP_TRIES/.test(mv2),
     '识别到之后交给往下挖 / 往上挖（不再直接收工）')
+  /* 🔴 2026-11-02 用户：「只用 allowDig 上地表，它会乱挖」—— 两条修法各钉一处。 */
+  ok(/if \(digDirTax > 0\)/.test(plug2)
+    && /m\.cost = \(Number\(m\.cost\) \|\| 0\) \+ digDirTax \* \(dyDir < 0 \? 5 : 2\)/.test(plug2)
+    && /if \(!Number\.isFinite\(dyDir\) \|\| dyDir > 0\) continue/.test(plug2),
+    'A* 挖方块按方向收税：向上原价、水平 +2 份、向下 +5 份（不再在三维里挑最便宜的挖法）')
+  ok(/digDirTax: allowDig === true \? Number\(self\.cfg\.walkDigSideTax \?\? 15\) : 0/.test(plug2)
+    && D2.walkDigSideTax === 15,
+    '方向税只在 allowDig 那趟生效，默认 15 步/份')
+  ok(/const upFirst = !upFirstDone && carveNoPathOk && Number\.isFinite\(dyUp0\)/.test(mv2)
+    && /dyUp0 >= 1\.5 && hUp0 <= 3 && downBudgetOk\(self\)/.test(mv2)
+    && /if \(upFirst\) upFirstDone = true/.test(mv2),
+    '目标在头顶且水平 ≤3 格时，allowDig 那趟先切一刀 climbUp 楼梯（只做一次）')
+  ok(!/shaftUp/.test(mv2),
+    '不搞"直井式"上升（挖开头顶那格后正上方没落脚点，跳起来只会掉回原格；往上必须造台阶）')
+  ok(/const cu = await climbUp\(b, target, \{ allowDig: carveNoPathOk, ctx, maxLevels: MOVE_CLIMB_LEVELS \}\)/.test(mv2),
+    '目标在头顶时走斜梯 climbUp（挖斜上两格 + 清自己头顶，跳上去落在相邻方块顶面）')
+  ok(/let stable = 0/.test(mv2) && /if \(Math\.abs\(y2 - lastY\) < 0\.02\) \{ stable \+= 1; if \(stable >= 2\) break \}/.test(mv2),
+    '跳完等"y 不再变"才挖下一层（取代固定 700ms，且不会挖到自己脚下）')
+  ok(/for \(let tryI = 0; tryI < 2 && !upOk; tryI\+\+\)/.test(mv2) && /if \(upOk\) \{ lifted = true; break \}/.test(mv2),
+    '同一个方向给两次起跳机会（偶发跳不上去就再来一次，不直接换方向）')
+  ok(/takenBy: String\(self\._moveGenWho \?\? 'unknown'\)/.test(mv2) && /if \(o\.takenBy\) extra\.takenBy = String\(o\.takenBy\)/.test(mv2),
+    '被打断时点名是谁领走的号（只报"被另一次移动接管"查不出人）')
+  ok(/_moveGenWho = 'init'/.test(read('../src/core.mjs')) && /#beginMove \(who = null\) \{ if \(who\) this\._moveGenWho/.test(read('../src/core.mjs')),
+    'core 记下每次领号的来源（beginMove 带 who）')
+  ok(/beginMove\('dig'\)/.test(readFileSync(new URL('../src/mining.mjs', import.meta.url), 'utf8')),
+    '挖矿领号也带来源标签（dig）')
+  ok(/climbedUp \+= Number\(cu\.up\) \|\| 0/.test(mv2)
+    && /\.\.\.\(climbedUp \? \{ climbedUp \} : \{\}\)/.test(mv2)
+    && /if \(num\(o\.climbedUp\) > 0\) extra\.climbedUp = num\(o\.climbedUp\)/.test(mv2)
+    && /if \(num\(o\.carved\) > 0\) extra\.carved = num\(o\.carved\)/.test(mv2),
+    '结果里报出"这趟挖了几格、靠 climbUp 往上爬了几格"（乱挖与正常向上挖可区分）')
   ok(/export const MOVE_DOWN_TRIES = 24/.test(mv2), '往下挖的硬上限放宽到 24（目标低 20 格也能一趟挖到底）')
   ok(/已经往下挖了 \$\{downTries\} 次还没到底/.test(mv2) && /已经往上挖了 \$\{upTries\} 次还没上去/.test(mv2),
     '报错时按"已经挖了几次"分流，并说清"再叫一次接着挖"')
@@ -2937,8 +2994,11 @@ section('㉒ 岩浆：泡在里面时自己上浮 + 找岸，不许交给 A*')
     '🔴 能不能挖要问 safeToBreak，不能拿代价 >=100 猜（黑曜石本来就 100+，以前被当成挖不了）')
   ok(/if \(block\?\.safe\) return c/.test(plugSrc2),
     '本来就能站的格子也不算挖')
-  ok(/const onDig = \(blk\) => \{[\s\S]{0,160}?dugNames\.set/.test(movSrc),
+  /* ⚠️ 2026-11-03：onDig 里补了「空气不算」的注释 ⇒ 距离从 160 放到 600（钉行为，不钉注释长度）。 */
+  ok(/const onDig = \(blk\) => \{[\s\S]{0,600}?dugNames\.set/.test(movSrc),
     '挖方块时记下名字（不然"挖了 12 格"看不出把家拆了）')
+  ok(/nm !== 'air' && nm !== 'cave_air' && nm !== 'void_air'/.test(movSrc),
+    '空气不算"挖掉了什么"（diggingCompleted 带的常是挖完那刻的方块 ⇒ 以前会报「挖掉的是 air×6」）')
   ok(/dugBlocksOut\(\)/.test(movSrc) && /dugHint\(\)/.test(movSrc),
     '出口报 dugBlocks（top 4），挖 ≥3 格时 hint 说明挖了什么')
 }
@@ -3617,22 +3677,40 @@ ok(/emptyNoPath = noPathPending/.test(mvSrcX), 'emptyNoPath 继承上一轮的 N
   ok(/打不过/.test(entityTextOf({ name: 'warden', dist: 2 })), '监守者那种直接说"打不过，绕开"')
 
   // ⑥ 主循环真的接上了（不是只写了个没人调的文件）
-  ok(/import \{[^}]*shouldWaitEntity[^}]*\} from '\.\/entity-avoid\.mjs'/.test(mvSrcX), 'movement.mjs 真的 import 了实体避让')
+  ok(/import \{[^}]*shouldDodgeEntity[^}]*\} from '\.\/entity-avoid\.mjs'/.test(mvSrcX), 'movement.mjs 真的 import 了实体绕行（`shouldDodgeEntity`）')
   ok(/const entScan = \(\) => entityObstacleAhead\(b, sp, \{ cells: MOVE_ENTITY_CELLS/.test(mvSrcX),
     '每轮走之前先扫一眼前方（用"站定点"而不是终点，跟进度口径一致）')
   /* ⚠️ 2026-10-30 全量审计：这段原来钉的是 `{0,220}` —— 中间那几行注释一加长就失配（钉距离太死）。
    *    改成宽一点，并把标题说准：停的是**被动**的（`shouldWaitEntity` 为真），敌对的不停。 */
-  ok(/entTimer = setInterval\(\(\) => \{[\s\S]{0,700}?if \(e2 && shouldWaitEntity\(e2\)\) \{ b\.__mcEntStop = e2/.test(mvSrcX),
-    '走的过程中每 350ms 扫一次，被**被动**实体挡住就主动停（判据正向：值得等才停）')
-  ok(/const entStop = b\.__mcEntStop/.test(mvSrcX) && /等实体不算一级脱困/.test(mvSrcX),
-    'catch 里认下"是被实体挡的" ⇒ 不占脱困阶梯')
+  ok(/entTimer = setInterval\(\(\) => \{[\s\S]{0,900}?if \(!entityDodgeOff && e2 && shouldDodgeEntity\(e2\)\) \{ b\.__mcEntStop = e2/.test(mvSrcX),
+    '走的过程中每 350ms 扫一次，被活物挡住就换路（`entityDodgeOff` 之后不再扫 ⇒ 直接挤过去）')
+  ok(/const entStop = b\.__mcEntStop/.test(mvSrcX) && /绕实体不算一级脱困/.test(mvSrcX)
+    && !/err\.mcEntity = entStop/.test(mvSrcX) && !/await waitEntityClear/.test(mvSrcX),
+    'catch 里认下"是被实体挡的" ⇒ 立刻换路重算（不占脱困阶梯、不等待、更不抛错收工）')
   ok(/blockedByEntity: \{ \.\.\.e\.mcEntity, waitedMs/.test(mvSrcX), '结果里报 blockedByEntity（谁挡着 + 等了多久）')
+  ok(/dodges: entityDodges, wentThrough: entityDodgeOff/.test(mvSrcX), '结果里报绕了几次 / 最后是不是挤过去的')
+  {
+    const eaSrc = readFileSync(new URL('../src/entity-avoid.mjs', import.meta.url), 'utf8')
+    ok(/export const MOVE_ENTITY_DODGE_MAX = 3/.test(eaSrc) && /entityDodges < MOVE_ENTITY_DODGE_MAX/.test(mvSrcX),
+      '同一条窄道绕满 3 次还挡 ⇒ 直接挤过去（不许无限重算）')
+    /* ⚠️ 2026-11-03：以前用「shouldDodgeEntity 之后 200 字内不许出现 isHostileEntity」——
+     *    只要附近注释提一句就假红。现在直接切出函数体再判。 */
+    const iDodge = eaSrc.indexOf('export function shouldDodgeEntity')
+    const iNext = eaSrc.indexOf('\nexport ', iDodge + 10)
+    const dodgeBody = iDodge >= 0 ? eaSrc.slice(iDodge, iNext > 0 ? iNext : iDodge + 600) : ''
+    ok(dodgeBody.length > 0 && !/isHostileEntity/.test(dodgeBody),
+      '绕行判据不分敌友：除了掉落物/弹射物，任何活物都绕')
+  }
   ok(/clearInterval\(entTimer\)/g.test(mvSrcX) && (mvSrcX.match(/clearInterval\(entTimer\)/g) ?? []).length >= 2,
     '定时器两处都收掉（成功分支 + catch），不许留着把进程钉住')
   {
     const plug = readFileSync(new URL('../src/plugins.mjs', import.meta.url), 'utf8')
     ok(/mv\.entityCost = \d+/.test(plug) && Number((plug.match(/mv\.entityCost = (\d+)/) ?? [])[1]) >= 4,
       'A* 侧真给实体所在格加了代价（不是 1 那种"等于不绕"）')
+    /* 🔴 2026-11-03：静态代价只在"生成节点那一刻"看实体；路径定好后怪再走进通道 A* 不知道。
+     *    ⇒ 再挂一条每次重算都现算的禁行区，怪站在唯一通道里也会被绕开。 */
+    ok(/mv\.exclusionAreasStep = \[/.test(plug) && /return n \* 60/.test(plug),
+      '每次重算都按当时的实体位置现算禁行区（不是只在规划那一刻看一眼）')
   }
 }
 

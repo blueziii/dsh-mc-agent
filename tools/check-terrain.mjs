@@ -332,7 +332,7 @@ section('⑥ 静态接线')
   ok(/const fresh = classifyTerrainCached\(b\)[\s\S]{0,400}?terrain = fresh/.test(movement),
     '🔴 脱困后按新地形重估一次（不再拿出发时的旧判断走到底）')
   ok(movement.indexOf('const terrain = classifyTerrainCached(b)') < movement.indexOf('ctx.movements(terrain'), '分类发生在取 Movements 之前')
-  ok(/const mv = ctx\.movements\(terrain, \{ digFirst \}\)/.test(movement), '把分类结果交给 ctx.movements')
+  ok(/const mv = ctx\.movements\(terrain, \{ digFirst, allowDig \}\)/.test(movement), '把分类结果交给 ctx.movements')
   ok(/\[opts\.arrived \? 'terrainAtStart' : 'terrain'\]: terrain\.kind \}/.test(movement), '返回值里带上地形（平地/未知时不报）')
   ok(/const arrivedTerrain = \(\) => \{[\s\S]{0,80}?classifyTerrainCached\(b\)/.test(movement), '🔴 到达时重算落点地形（出发时那份会写着 gap，属主动误导）')
   ok(/\.\.\.moveInfo\(\{ arrived: true \}\), \.\.\.arrivedTerrain\(\),/.test(movement), '到达分支用 terrainAtStart + arrivedTerrain 这一对')

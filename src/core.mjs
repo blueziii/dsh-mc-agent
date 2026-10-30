@@ -186,7 +186,7 @@ export const DEFAULTS = {
   moveBudgetMs: CALL_BUDGET_MS,   // 2026-10-28 参数审计：原来 40_000（超单次上限 CALL_MS）⇒“忘了传 budget”的内部走路以为有 40 秒
   preferDoors: true, doorDigPenalty: 8,   // 优先走门/绕路：给"挖墙"加代价（2026-10-18）
   walkDigFirst: false, walkDigFirstCost: 0.4,   // 2026-10-31：默认关（一律先绕、绕不过才挖）；true = 挖一格按 0.4 步计价
-  walkDigDetourMax: 15,   // 2026-10-27：每挖一格额外按"多绕 N 步"记账 ⇒ 绕 ≤N 格不挖、超过才挖（用户：允许挖（`allowDig:true`）会挖家）
+  walkDigDetourMax: 15, walkDigSideTax: 15,   // 每挖一格额外按"多绕 N 步"记账 ⇒ 绕 ≤N 格不挖；SideTax = 横着挖多收 2 份、往下多收 5 份（2026-11-02 用户：只 allowDig 上地表会乱挖）
   walkTowerCost: null,   // null = 按地形档案（平地 12 / 沟 8…），显式给数值才覆盖
   walkLeafDigPenalty: 6,   // 2026-10-29：树叶不进禁挖名单，改成每格按 ×N 记账（塞进 mv.dshBreakPenalty；0 = 回到禁挖）
   /* 2026-10-23：耕地/土径不进 A* 的落脚点（防踩坏、防挖开挡路的）。代价：唯一通路时寻路报 NoPath 而不是硬穿。 */
@@ -478,15 +478,13 @@ export class McBot extends EventEmitter {
     return Math.max(0, Math.min(CALL_MS, this.msLeft()))
   }
 
-  /**
-   * 移动的"当前归属者"编号。
-   * 🔴 为什么需要（2026-10-06 实机）：自主层被怪贴上会自己逃，AI 那轮可能正在 mc_move/mc_dig，
-   *    两份移动占同一个 bot.pathfinder，先收尾的那份会把另一份一起停掉。每次移动领一个号，收尾时只有"号还是最新的"才允许动。
-  */
+  /** 移动的"当前归属者"编号（2026-10-06：两份移动占同一个 pathfinder，先收尾的会把另一份一起停掉）。
+   *  `_moveGenWho` 记**谁**领的 —— 2026-11-03 用户「怎么还是被打断」，只说"被接管"查不出人。 */
   _moveGen = 0
+  _moveGenWho = 'init'
 
-  /** 领一个新的移动号（旧号的那次走路收尾从此失效） */
-  #beginMove () { return ++this._moveGen }
+  /** 领一个新的移动号（旧号那次走路收尾从此失效）；`who` 只用于事后追查"谁抢的" */
+  #beginMove (who = null) { if (who) this._moveGenWho = String(who); return ++this._moveGen }
 
   /** 抢占正在走的 / 正在挖着走的（实现在 `src\runtime.mjs` 的 `interruptMove`：推移动号 + 停采集 + 松控制位）。 */
   async interruptMove (reason = '') { return await interruptMoveImpl(this, reason, this.#runCtx()) }
@@ -528,7 +526,7 @@ export class McBot extends EventEmitter {
   async #cancelCollect (b, opts = {}) {
     return await cancelCollect(b, {
       ...opts,
-      bumpGen: () => { this._moveGen++ },
+      bumpGen: (who) => { this._moveGen++; if (who) this._moveGenWho = String(who) },
       stopPathing: (bb) => this.#stopPathing(bb),
       releaseControls: () => this.#releaseControls(),
       log: (m) => this.log(m)
@@ -709,7 +707,7 @@ export class McBot extends EventEmitter {
       movements: (terrain, opts) => this.#movements(terrain, opts),
       collectBusy: (b) => this.#collectBusy(b),
       cancelCollect: (b) => this.#cancelCollect(b),
-      beginMove: () => this.#beginMove(),
+      beginMove: (who) => this.#beginMove(who),
       stopPathing: (b) => this.#stopPathing(b),
       releaseControls: () => this.#releaseControls(),
       /* 2026-10-23 审计：原来这里没有 cfg ⇒ movement.mjs 里 `ctx.cfg?.walkCanDig !== false` 恒真
@@ -740,7 +738,7 @@ export class McBot extends EventEmitter {
   #moveCtx () {
     return {
       walkPathfinder: (t, o) => this.#walkPathfinder(t, o),
-      beginMove: () => this.#beginMove(),
+      beginMove: (who) => this.#beginMove(who),
       releaseControls: () => this.#releaseControls(),
       cfg: this.cfg,   // 挖台阶补救要读 walkCanDig/walkCarveStep（2026-10-18 审计 Bug 3）
       moveGenOf: () => this._moveGen,   // 同上：bot 上没有 _moveGen
@@ -825,7 +823,7 @@ export class McBot extends EventEmitter {
       taskSettle: (task, out, okCount, wantTotal) => this.#taskSettle(task, out, okCount, wantTotal),
       verdictLine: (out, okCount, wantTotal) => this.#verdictLine(out, okCount, wantTotal),
       withHeld: (out, b, before) => this.#withHeld(out, b, before),
-      beginMove: () => this.#beginMove(),
+      beginMove: (who) => this.#beginMove(who),
       waitGrounded: (b, ms) => this.#waitGrounded(b, ms),
       equipFor: (b, blk, label) => this.#equipFor(b, blk, label),
       watchServerBreak: (b, pos) => this.#watchServerBreak(b, pos),
@@ -851,14 +849,14 @@ export class McBot extends EventEmitter {
   async bridge (opts = {}) { return await bridgeAcross(this, opts, { t: (p, k, l) => this.#t(p, k, l) }) }
 
   /** 原地跳一下（爬台阶用）—— 实现在 `src\movement.mjs` 的 `jump`。 */
-  async jump () { return await jumpImpl(this, { bumpGen: () => this.#beginMove() }) }
+  async jump () { return await jumpImpl(this, { bumpGen: () => this.#beginMove('jump') }) }
 
   /** 上浮换气（在水里按住 jump 游泳）—— 实现在 `src\movement.mjs` 的 `swimUp`。 */
-  async swimUp (opts = {}) { return await swimUpImpl(this, opts, { bumpGen: () => this.#beginMove() }) }
+  async swimUp (opts = {}) { return await swimUpImpl(this, opts, { bumpGen: () => this.#beginMove('swim') }) }
   async respawnNow () { return await respawnNowImpl(this) }
 
   /** 船/矿车：开（`look` 定方向 + `moveVehicle` 给动力）与下来（潜行，不是 dismount 包）—— `src\boat.mjs`。 */
-  async driveBoat (target, opts = {}) { return await driveBoat(this, target, opts, { bumpGen: () => this.#beginMove() }) }
+  async driveBoat (target, opts = {}) { return await driveBoat(this, target, opts, { bumpGen: () => this.#beginMove('boat') }) }
   async dismountVehicle (opts = {}) { return await dismountVehicle(this, opts) }
 
   /* ───────────── 创造取物 / 使用 / 攻击 / 丢弃（补能力，2026-09-15）───────────── */

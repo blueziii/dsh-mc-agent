@@ -47,7 +47,7 @@ export function collectBusy (b) {
 export async function cancelCollect (b, ctx = {}) {
   const { force = false, budgetMs = null, bumpGen = null, stopPathing = null, releaseControls = null, log = null } = ctx
   if (force || collectBusy(b)) {
-    try { bumpGen?.() } catch {}     // 采集/挖矿也算"一次移动"
+    try { bumpGen?.('collect') } catch {}     // 采集/挖矿也算"一次移动"
     /* 🔴 这里的等待**必须能被调用方限住**（2026-10-08 实机反馈：
      *    `mc_dig` 报 `Error: tool call timed out after 6000ms`，而方块其实早挖掉了）。
      *    `cancelTask()` 最多等 1.5 秒，这段等待以前**不计入**任何预算 —— 挖 2 个目标就是

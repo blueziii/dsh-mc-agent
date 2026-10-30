@@ -10,11 +10,15 @@
  * 常常直接变成 `NoPath`。路径定下来之后实体再走过来，执行层**完全不管**：
  * 人就这么顶着怪/顶着动物走，直到采样器判"卡住"（2.4 秒）再进脱困阶梯。
  *
- * 这一层管执行期的三件事：
+ * 🔴 2026-11-03 用户定案（原文）：「不要抛错，直接绕过去。敌对和末影龙都不要」。
+ *    前一天的做法是"敌对的立刻收工、被动的等 900ms 等不到也收工"，实机表现是
+ *    「现在遇到怪就走不动了」「我挡在路上也走不动」—— 人一格不挪地站在原地，
+ *    既不绕也不打，还白挨打。**收工不是避让**。现在的规矩：任何活物挡路 ⇒ 重算一条路绕开；
+ *    同一条窄道上绕不过去（重算次数用完）⇒ 直接挤过去。只有掉落物/弹射物不管。
+ *
+ * 这一层管执行期的两件事：
  *   ① **看得见**：前方一小段（默认 2 格）里有谁挡着、是什么、多远（复用 `entityObstacleAhead`）；
- *   ② **分敌友**：敌对的（僵尸/骷髅/苦力怕…）**不等** —— 站着等只会挨打，直接交给 AI 决定
- *      `mc_attack` 还是换个方向；被动/中立（动物、村民、玩家、船、矿车）值得等它走开；
- *   ③ **有上限**：最多等 `MOVE_ENTITY_WAIT_MS`（默认 900ms），还不走就如实报，不无限磨。
+ *   ② **说清怎么办**：一律绕（`shouldDodgeEntity`），绕几次由调用方计数（`MOVE_DODGE_MAX`）。
  *
  * 这里只放**纯函数与计时辅助**，不碰 pathfinder —— 接入点在 `src/movement.mjs` 主循环，
  * 这样 `tools/check-*.mjs` 能拿假 bot 直接测敌友判定与等待逻辑（不需要真服务端）。
@@ -40,6 +44,20 @@ export function isHostileEntity (e) {
   if (PASSABLE_RE.test(nm)) return false
   return HOSTILE_RE.test(nm)
 }
+
+/**
+ * 该为它换一条路吗？（2026-11-03 用户：「不要抛错，直接绕过去。敌对和末影龙都不要」）
+ * 除了掉落物/弹射物/装饰实体，**一律绕** —— 动物、村民、玩家、僵尸、末影龙都一样：
+ * 不站着等、也不收工，交给 A* 换一条路（重算次数由调用方数，见 `MOVE_DODGE_MAX`）。
+ */
+export function shouldDodgeEntity (e) {
+  const nm = String(typeof e === 'string' ? e : (e?.name ?? e?.username ?? '')).replace(/^minecraft:/, '')
+  if (!nm) return false
+  return !PASSABLE_RE.test(nm)
+}
+
+/** 一次移动里最多为实体重算几次路（再多就是在同一条窄道上打转 ⇒ 直接挤过去）。 */
+export const MOVE_ENTITY_DODGE_MAX = 3
 
 /** 该不该等它让开（false ⇒ 立刻收工交给 AI，站着等只会挨打）。 */
 export function shouldWaitEntity (e) {
@@ -68,8 +86,11 @@ export function entityTextOf (blocker) {
   const nm = String(blocker.name ?? '实体')
   const who = blocker.player ? `玩家 ${blocker.player}` : nm
   if (DANGEROUS_RE.test(nm)) return `前方 ${blocker.dist} 格是 ${who} —— **绝对打不过，绕开**`
-  if (isHostileEntity(nm)) return `前方 ${blocker.dist} 格是 ${who}（**敌对**，站着等只会挨打）—— 要过就先 \`mc_attack\`，否则换个方向绕`
-  return `前方 ${blocker.dist} 格是 ${who}（被动/中立）—— 它会挡路`
+  /* 🔴 2026-11-03 用户：「不要抛错，直接绕过去。敌对和末影龙都不要」「不要不动和遇到停住」
+   *   以前这里劝「先 mc_attack，否则换个方向绕」，但那是**收工交给人**的说法 —— 现在
+   *   走路遇到活物一律自己绕（见 shouldDodgeEntity），所以文案也要改成同一口径。 */
+  if (isHostileEntity(nm)) return `前方 ${blocker.dist} 格是 ${who}（**敌对**）—— 我绕开`
+  return `前方 ${blocker.dist} 格是 ${who}（被动/中立）—— 它会挡路，我绕开`
 }
 
 /**

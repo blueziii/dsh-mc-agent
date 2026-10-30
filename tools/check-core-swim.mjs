@@ -386,15 +386,15 @@ section('⑧ 静态接线：core / index 都在')
   /* 🔴 2026-10-08 第四份审计报告 ①④⑧：swimUp 以前不认中断、预算归零白送 200ms、`hold:0` 被当 3000。 */
   ok(/if \(self\.abortSignal\?\.aborted\) throw abortError\('上浮'/.test(movSrc), 'swimUp 认中断')
   ok(/raceAbort\(sleep\(100\), self\.abortSignal, '上浮'\)/.test(movSrc), 'swimUp 的 sleep 可中断')
-  ok(/const gen = bumpGen\(\)/.test(movSrc) && /if \(self\._moveGen !== gen\) \{ preempted = true; break \}/.test(movSrc),
+  ok(/const gen = bumpGen\('swimup'\)/.test(movSrc) && /if \(self\._moveGen !== gen\) \{ preempted = true; break \}/.test(movSrc),
     'swimUp 领 _moveGen 号、被接管就让位')
   ok(/if \(self\._moveGen === gen\) \{ try \{ b\.setControlState\('jump', false\) \}/.test(movSrc), 'swimUp 只在还是自己时松 jump')
   ok(!/Math\.max\(200, Math\.min\(Number\(hold\)/.test(movSrc), '预算归零时不再白送 200ms')
   ok(/Number\.isFinite\(Number\(hold\)\) \? Number\(hold\) : 9_000/.test(movSrc), 'hold:0 不再被当成 9000（默认值只给 NaN）')
   /* 第三十五刀接线：core 那边只剩薄包装，私有 `#beginMove` 靠 `ctx.bumpGen` 递进去（迁移规矩第 28 条）。 */
   ok(/from '\.\/movement\.mjs'/.test(core), 'core：movement 从 movement.mjs 导入')
-  ok(/async jump \(\) \{ return await jumpImpl\(this, \{ bumpGen: \(\) => this\.#beginMove\(\) \}\) \}/.test(core), 'core 的 jump 是薄包装')
-  ok(/async swimUp \(opts = \{\}\) \{ return await swimUpImpl\(this, opts, \{ bumpGen: \(\) => this\.#beginMove\(\) \}\) \}/.test(core), 'core 的 swimUp 是薄包装')
+  ok(/async jump \(\) \{ return await jumpImpl\(this, \{ bumpGen: \(\) => this\.#beginMove\('jump'\) \}\) \}/.test(core), 'core 的 jump 是薄包装')
+  ok(/async swimUp \(opts = \{\}\) \{ return await swimUpImpl\(this, opts, \{ bumpGen: \(\) => this\.#beginMove\('swim'\) \}\) \}/.test(core), 'core 的 swimUp 是薄包装')
   /* 🔴 第二十二刀：步骤分发（`#runStep`）搬进 `src\sequence.mjs` ⇒ 改成查新模块（那边是 `self.`）。 */
   const seqSrc = strip(readFileSync(new URL('../src/sequence.mjs', import.meta.url), 'utf8'))
   ok(/case 'swim':/.test(seqSrc) && /self\.walkTo\(s, \{ budget: callBudget\(s\.budgetMs\) \}\)/.test(seqSrc) && /self\.swimUp\(s\)/.test(seqSrc),
@@ -629,7 +629,7 @@ section('⑪ 静态接线：ceiling 早退在 bumpGen 之前')
 {
   const src = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
   const iCeil = src.indexOf("reason: 'ceiling'")
-  const iBump = src.indexOf('const gen = bumpGen()', Math.max(0, iCeil))
+  const iBump = src.indexOf('const gen = bumpGen(', Math.max(0, iCeil))
   ok(iCeil > 0, 'movement.mjs 有 reason: ceiling 分支')
   ok(iBump > iCeil, '天花板检查在领移动号之前（不推代次、不打断别人）')
   ok(/const ceilingOf = \(\) =>/.test(src), '有 ceilingOf() 读头顶两格')

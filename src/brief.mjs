@@ -80,6 +80,8 @@ export function briefOf (value, { json = (x) => JSON.stringify(x), maxLines = BR
  */
 export function finiteOnly (v, depth = 0) {
   if (depth > 8) return v
+  /* undefined 也过不了「无损 JSON」校验（键在、值是 undefined 就会整条作废）。 */
+  if (v === undefined) return null
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   if (Array.isArray(v)) return v.map((x) => finiteOnly(x, depth + 1))
   if (v && typeof v === 'object') {

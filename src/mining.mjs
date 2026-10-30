@@ -793,7 +793,7 @@ export async function dig (self, {
     /* 🔴 2026-10-08 审计④：`interruptMove()` 以前是**死代码**（定义了没人调），而文档说 mc_dig 靠它抢占。
      *    走路/采集会按着 forward、占着 pathfinder ⇒ 先把还在跑的移动真停掉，再领号。 */
     await self.interruptMove()
-    ctx.beginMove()
+    ctx.beginMove('dig')
     let seen = 0
     const reachMax = b.game?.gameMode === 'creative' ? 5.0 : 4.5
     /* 🔴 2026-10-29（用户：「mc_dig coal_ore 挖几块后会开始挖其他地方的矿，但最近的并没有挖完」）：

@@ -441,6 +441,31 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
     let pvpRangeSave = null
     try { pvpRangeSave = b.pvp.attackRange; b.pvp.attackRange = 0 } catch { /* 老版本没这字段就算了 */ }
     try { b.on?.('attackedTarget', onAtk) } catch { /* 事件挂不上不影响出手 */ }
+    /* 🔴 2026-11-02（用户 m15348：「打到一下以后，不会追着打」）：
+     *   追还是交给 vendor 的 `GoalFollow`（它成熟、不阻塞，天然能边跑边打），但它有三个洞要在外面补：
+     *   ① `attack()` 内部 `setMovements(new Movements(...))`（`PVP.js:71`）—— 把我们配的门/垫柱/挖/
+     *      实体避让/落差上限整套顶掉，追的时候走的是没打过补丁的那份 ⇒ 这里换回我们自己的（下面那行）。
+     *   ② 它停了**不会自己起来**：`entityGone` / `dist > viewDistance` / `NoPath` 走到 `path_stop`
+     *      任一个都会清掉 `this.target`，之后没人重设 ⇒ 我们循环只等不追，一直耗到超时。
+     *      现在每 500ms 看一眼：target 丢了、或者人 700ms 没挪，就重新发起追击（下面循环里那段）。
+     *   ③ 重设次数有上限（`CHASE_MAX`），真的追不上就如实报，不许死循环。 */
+    let chaseResets = 0
+    let lastChaseAt = 0
+    let chaseStallAt = Date.now()
+    let chasePos = b.entity?.position ? { x: b.entity.position.x, z: b.entity.position.z } : null
+    let chaseGaveUp = false
+    let lastWalkAt = 0
+    const CHASE_MAX = 30
+    const chaseAgain = async () => {
+      const now3 = Date.now()
+      if (now3 - lastChaseAt < 500) return
+      if (chaseResets >= CHASE_MAX) { chaseGaveUp = true; return }
+      lastChaseAt = now3
+      chaseResets++
+      try { b.pvp.forceStop?.() } catch { /* 老版本没有 forceStop：下面 attack 会自己 stop */ }
+      try { await b.pvp.attack(target) } catch (e) { pvpErr = String(e?.message ?? e) }
+      chaseStallAt = Date.now()
+    }
     try {
       /* 🔴 2026-10-28（用户：「有高低差呢」）：pvp 的挥拳只判**距离**，不管中间有没有东西 ——
        *    隔着一层地板/墙时它照样空打到预算耗尽。这里先做视线检查，被挡就不进战斗。 */
@@ -451,7 +476,10 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
           + ' —— 挥了也是空；先挖开那一格，或者绕到能看见它的位置再打'
         ), { mcLos: true })
       }
+      /* 让 pvp 用**我们这份** Movements（它默认会 new 一份默认配置，把门/垫柱/挖/避让全顶掉）。 */
+      try { if (b.pathfinder?.movements) b.pvp.movements = b.pathfinder.movements } catch { /* 换不过来就用它自己的 */ }
       await b.pvp.attack(target)
+      chaseStallAt = Date.now()   /* 刚发起追击，重新起算"多久没挪" */
       while (Date.now() - t0 < bd) {
         if (ctx.abortSignal?.aborted) break
         if (!b.entities?.[target.id] || target.isValid === false) break
@@ -479,6 +507,53 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
           && dd > (fleer ? 7 : 6) && (RANGED_RE.test(label) || fleer)) {
           chaseGiveUp = true
           break
+        }
+        /* ③ 够不着 ⇒ 确认 vendor 还在追（它掉线是本函数最隐蔽的坑，见上面 `chaseAgain` 的注释）。
+         *   判据只用两件事：它自己还认不认这个 target、以及我这一拍有没有真的挪动。 */
+        if (dd > ATTACK_REACH + 0.4) {
+          const now3 = Date.now()
+          const p3 = b.entity?.position
+          const stalled = Boolean(chasePos && p3
+            && Math.hypot(p3.x - chasePos.x, p3.z - chasePos.z) < 0.25)
+          if (stalled) { /* 原地不动就一直算停着 */ } else chaseStallAt = now3
+          const lost = !b.pvp?.target
+          if (lost || now3 - chaseStallAt >= 700) await chaseAgain()
+          if (chaseGaveUp) break
+          /* 🔴 2026-11-02（用户 m15465：「不能前半段用我们的 move、后半段用 pvp 吗」）：
+           *   现在正是这么分的 —— 策略层 `d0 > 3.5` 先用自己的 `walkTo`（会绕、会挖、会跳、会避让）
+           *   走到 3.2 格内，再交给 pvp 贴身追、我们挥拳。
+           *   缺的是**交接处的回退**：pvp 只会在平地上蹭，途中一个坑/台阶/水面它就走不动，
+           *   而我们已经进了 engage ⇒ 没人再走路。所以连续重设 3 次追击、距离还是 > 4 格时，
+           *   切回 `ctx.moveTo` 自己走一段（走完把计数清零，下一拍再交给 pvp）。 */
+          /* 预算口径：先留 800ms 给挥拳，剩下的才拿来走路；不够 500ms 就这一拍不走
+           * （全仓禁止 Math.max(固定值, …剩余…) 那种写法 —— 见 check-call-budget）。 */
+          const restMs = ctx.callLeft() - 800
+          if (chaseResets >= 3 && dd > 4.0 && typeof ctx.moveTo === 'function'
+            && now3 - lastWalkAt >= 800 && restMs > 500) {
+            lastWalkAt = now3
+            const tp2 = target.position
+            const mp2 = b.entity?.position
+            if (mp2 && tp2) {
+              const pt = approachPointOf({ x: mp2.x, y: mp2.y, z: mp2.z }, { x: tp2.x, y: tp2.y, z: tp2.z },
+                Math.max(1.5, dd - 2.0))
+              const slot = Math.min(1_500, restMs)
+              try {
+                const mv2 = await ctx.moveTo(pt, { arrive: 1.0, budget: slot, reason: `战斗追击：走到「${label}」旁边` })
+                if (mv2 && mv2.arrived !== true) {
+                  moveErr = String(mv2.hint ?? mv2.reason ?? '追到一半停了，没给原因').slice(0, 140)
+                }
+              } catch (e) {
+                moveErr = String(e?.message ?? e).slice(0, 140)
+              }
+              chaseResets = 0
+              chaseStallAt = Date.now()
+              continue
+            }
+          }
+          if (p3) chasePos = { x: p3.x, z: p3.z }
+        } else {
+          chaseStallAt = Date.now()
+          if (b.entity?.position) chasePos = { x: b.entity.position.x, z: b.entity.position.z }
         }
         /* ③ 自己挥拳。够得着就按手里那把的冷却挥（剑 700ms / 斧 1250ms / 空手 250ms）。 */
         if (dd <= ATTACK_REACH) {
@@ -569,8 +644,13 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
             : '')
           + '；也可以先 mc_move 到它旁边，或换个不跑的目标'
     }
+    if (chaseGaveUp && !note) {
+      note = `追了 ${(waitedMs / 1000).toFixed(1)} 秒没靠近（重设了 ${chaseResets} 次追击，人一直在原地）`
+        + ' —— 它多半在高处 / 水里 / 被方块隔着；先 mc_move 到它旁边，或者换 mc_shoot'
+    }
     return {
       attacked: label, distance: Number(distOf(target).toFixed(1)), killed, gone, health: b.health, via: 'pvp', waitedMs,
+      ...(chaseResets ? { chaseResets } : {}),
       /* 追上了却没伤到人时，这两条是唯一的分辨依据：`swings:0` = 压根没出手，
        * `swings>0` 而 `killed:false` = 出手了没打死（伤害不够/它跑得快）。 */
       swings: mySwings, pvpSwings,
