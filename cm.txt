@@ -1,9 +1,0 @@
-0.6.74：两张方块厚的台阶不再当墙、被打断会说是谁抢的、输出不再整条作废
-
-- stepUp：三格全实心时 allowDig 挖掉头上两格再跳（以前直接报 wall 收工，一条路永远走不通）
-- climbUp：先清自己头顶那一格；挖完等落地站稳；同方向给两次起跳机会
-- 走路被抢走控制权时带 takenBy（dig / walk:* / emergency:*），两处出口都点名
-- 自保反射不再打断正在走的移动（只提醒，进度不再白丢）
-- mc_move / mc_attack 出口整体过 finiteOnly（NaN/Infinity 换 null，避免 invalid output）
-- 目标在头顶时先规整挖楼梯（upFirst）+ 挖侧面方块按方向收税 walkDigSideTax
-- dugBlocks 不再把 air 算成挖掉的东西；实体绕行提示去掉自相矛盾的那句
