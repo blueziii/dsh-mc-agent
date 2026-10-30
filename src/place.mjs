@@ -183,6 +183,9 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
       const want = b.heldItem?.name ?? null
       let before = null
       try { before = target ? (b.blockAt(target, false)?.name ?? null) : null } catch { before = null }
+      /* 🔴 2026-10-30（B）：自己放的这格先登记给 vendor —— 否则 blockUpdate 会把它当成
+       *    “路径变了”，把整条路清空重算（垫柱一趟只上 1~2 格的真因）。 */
+      try { b?.pathfinder?.markExpected?.(target) } catch { /* vendor 没这接口就跳过 */ }
       try {
         await Promise.race([
           Promise.resolve(b.placeBlock(refBlock, new Vec3(face.x, face.y, face.z))),

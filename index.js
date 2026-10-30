@@ -2785,6 +2785,27 @@ export function apply(ctx, rawConfig) {
     return { ...res, outcome, outcomeText: verdictText(outcome) }
   }
 
+  /* 2026-10-29（用户：「为什么现在 ai 死了好像不知道」）：
+   * 死亡会自动重生（mineflayer `loader.js:75` 默认 `respawn = true`），位置一下就跳回重生点。
+   * 以前这件事只进事件队列（要主动 mc_events 才看得到），工具返回里只剩“走不动/没路/太远”
+   * —— 模型看不出是因为死了一次。这里给动作开一份“这期间死过没”的对账。 */
+  const deathMarkOf = (sess) => Number(sess?.stats?.deaths ?? 0) || 0
+  const deathNoteOf = (sess) => {
+    const life = sess?._life ?? {}
+    const pos = life.position ?? null
+    const back = life.respawnPosition ?? null
+    return {
+      died: true,
+      ...(pos ? { diedAt: { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) } } : {}),
+      ...(back ? { respawnedTo: { x: Math.round(back.x), y: Math.round(back.y), z: Math.round(back.z) } } : {}),
+    }
+  }
+  const deathLineOf = (sess) => {
+    const n = deathNoteOf(sess)
+    const f = (q) => (q ? `(${q.x}, ${q.y}, ${q.z})` : '位置不明')
+    return `\n\u2620 这期间我死了一次（死在 ${f(n.diedAt)}），现在在重生点 ${f(n.respawnedTo)} —— 刚才那个目标作废了。`
+  }
+
   /**
    * 🔴 2026-10-25（用户：「move和dig如果没办法到那格应该自动切换成可破坏」）：
    *   默认不挖（`noDig:true`）走不通时，**自动**改成允许挖穿挡路方块再走一次。
@@ -4116,7 +4137,7 @@ export function apply(ctx, rawConfig) {
       + '在水里不用选模式：给 x/y/z 就自己游过去（默认一直浮在水面，不会沉下去）。\n'
       + 'mode="boat" 开船（先 use 上船；下船用 mode="dismount"）。\n'
       + '🔴 **一次只走 10 秒**。没走到返回 `arrived:false`+`remaining`+`hint`——**再叫一次往同一目标走**。\n'
-      + '🔴 默认不垫 1×1 柱（`allowTower:true` 才允许）；上高处走斜台阶会报 `pillaredWith`。\n'
+      + '🔴 默认不垫方块、不搭路：垒柱子要 `allowTower:true`，路断了自动铺桥要 `allowBridge:true`。\n'
       + '🪜 **一格台阶会先试着踩上去**（量真实位移才算成功）；头顶被堵就跳不起来 —— 允许挖时只清头顶那格，不挖报 `stepUp.why="no-headroom"`。\n'
       + '🔴 走不动会分清挡着的是什么：`entity`（实体，别挖）/ `lava`（岩浆，挖不动）/ `waiting_chunks`（区块没加载，等）/ `stepUp`（一格台阶）。\n'
       + '🧭 `intent` 决定"到"的标准：near（默认）/ stand / interact（2.2 格）/ same-level。\n'
@@ -4137,6 +4158,7 @@ export function apply(ctx, rawConfig) {
       budgetMs: { type: 'number', description: '走路/游泳最长时间（≤10000）' },
       waterRecover: { type: 'boolean', description: '游不动时自动找出口（默认 true）' },
       allowTower: { type: 'boolean', description: '允许垫 1×1 柱往上爬（默认不许，容易摔死）' },
+      allowBridge: { type: 'boolean', description: '允许自动搭路：A* 没路时朝目标铺方块造桥（直线、一次≤4格、血量<8 不铺）' },
       intent: { type: 'string', description: 'near（默认）/ stand / interact / same-level' },
     },
     output: text(),
@@ -4183,13 +4205,15 @@ export function apply(ctx, rawConfig) {
       /* 🔴 2026-10-29（用户：「mc_move 的输出单独做一次精简」）：模型只看三形态
        *   `progress` / `arrived` / `blocked`；寻路细节（roadInfo/moveInfo/fellInfo/dugBlocks/
        *   shaft/briefBlocks/逐级 planTried…）**只进本地日志**，不进模型上下文。 */
+      const deaths0 = deathMarkOf(sess)
       const finish = (res) => {
         const brief = briefMoveOf(res, sess.bot.bot?.entity?.position ?? null)
         /* 明细落日志：出问题时翻日志能看到全部字段（原来这些都在返回里）。 */
         try {
           logLine(`mc_move 明细 target=${JSON.stringify(target)} args=${JSON.stringify(args)} → ${JSON.stringify(res)}`)
         } catch { /* 日志写不进去不影响结果 */ }
-        return { ...brief, text: briefMoveTextOf(brief) }
+        const died = deathMarkOf(sess) > deaths0
+        return { ...brief, ...(died ? deathNoteOf(sess) : {}), text: briefMoveTextOf(brief) + (died ? deathLineOf(sess) : '') }
       }
       if (use === 'fly') {
         if (wantsXZ) throw new Error('fly 是三维直飞，必须给 y（xz:true 只对 walk 有效）')
@@ -4201,7 +4225,7 @@ export function apply(ctx, rawConfig) {
       }
       if (use !== 'walk') throw new Error(`未知 mode："${use}"（可用 walk / fly / jump / boat）`)
       /* 2026-10-25：走不通就自动改成「挖穿挡路的方块」再走一次（显式 `noDig:false` 除外）。 */
-      return finish(withOutcome(await walkWithAutoDig(sess, target, { noDig, noTower: args.allowTower !== true, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }, args.budgetMs, noDig === true), { expect: 'moved' }))
+      return finish(withOutcome(await walkWithAutoDig(sess, target, { noDig, noTower: args.allowTower !== true, noBridge: args.allowBridge !== true, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }, args.budgetMs, noDig === true), { expect: 'moved' }))
     },
   }))
 
@@ -4218,16 +4242,17 @@ export function apply(ctx, rawConfig) {
       + '· bridge 搭路：朝 (x,y,z) 铺脚下一层；加 slope:±1 就每格升降 1（搭楼梯）；脚下悬空/区块没加载/血量<8 就停，岩浆与深空只警告\n'
       + '· break 破坏 (x,y,z)：自动换对的工具；视线被挡会先把挡路的挖开\n'
       + '· use 用方块/实体(who)：门/按钮/拉杆/喂动物；都不给=用手上的\n'
-      + '· useitem 用手上的东西：扔眼睛/雪球；**带 x/y/z 会先瞄准、停 450ms 再用**（舀水/骨粉/补种都带坐标）\n'
+      + '· useitem 用手上的东西：扔眼睛/雪球；**带 x/y/z 先瞄准、停 450ms 再用**（舀水/骨粉/补种）\n'
       + '· equip 装备(name)：护甲自动穿、盾进副手\n'
       + '· toss 丢弃(name,count)\n'
-      + '· jump 原地跳（爬台阶/脱困）\n'
-      + '· sleep 睡最近的床（夜里或雷雨才行；白天会直接告诉你别白跑）\n'
+      + '· jump 原地跳\n'
+      + '· sleep 睡最近的床（夜里/雷雨才行；白天直接说别白跑）\n'
       + '· wake 起床（躺着时才有用）\n'
-      + '· farm 耕地+播种（给 x/y/z 就那一格，不给就在周围找土；上面熟了的先收）\n'
+      + '· farm 耕地+播种（给 x/y/z 就那一格，不给就在周围找；熟了的先收）\n'
       + '· boat 放船并坐上去：自动找周围 2–4 格内**能放船的水面**（水 + 上方空气），对准水面放、\n'
       + '  放下后复核船底是水，默认上船（board:false 只放），给 x/y/z 就在那附近找\n'
-      + '· dismount 从船/矿车/坐骑上下来（开船用 mc_move boat）',
+      + '· dismount 下船/下车（开船用 mc_move boat）\n'
+      + '· respawn 重生（死着时用，不叫就躺着）',
     parameters: {
       mode: { type: 'string', description: '见上面各 mode（默认 look）' },
       who: { type: 'string', description: '玩家/实体名（look/toward/use）' },
@@ -4264,6 +4289,8 @@ export function apply(ctx, rawConfig) {
         /* 🔴 2026-10-23 实机（用户直接把『未知 mode："jump"』贴回来）：跳一下属于移动，
          *    但人在 mc_act 里找它（脱困 / 爬台阶时手最顺的就是这个工具）。与其报错让人换工具，
          *    直接把 jump 接过来 —— 和 mc_move {mode:"jump"} 走同一条路（同一个 bumpGen）。 */
+        /* 2026-10-29（用户：「改成由 ai 选择重生」）：现在不自动重生，模型叫这里。 */
+        case 'respawn': return withOutcome({ mode, ...(await bot.respawnNow()) }, { ...aroundOf(sess) })
         case 'jump':    return withOutcome({ mode, ...(await bot.jump()) }, { ...aroundOf(sess) })
         case 'look': {
           /* 2026-10-24：带 newEntity / track / samples / useItem 时走跟踪层（src/look-track.mjs）。

@@ -684,8 +684,10 @@ section('3.6 在水里憋气（氧气见底）→ 叫醒 AI 上浮（不是"挨�
   const sub0 = setup({ world: { inWater: true, air: null, submerged: true, health: 20 }, patch: { lookAround: false } })
   sub0.tick(sub0.at(1000))
   await flush()
-  ok('读不到氧气 + 刚下水（头在水下不到 10 秒）→ 先不叫醒（别神经过敏）',
-    sub0.agent.steers.length === 0 && jumped(sub0) === 0,
+  /* 2026-10-29（用户：「自动上浮失效了」）：这条以前还要求 `jumped === 0` ——
+   * 但 autoFloat 自己按 jump 上浮不算“神经过敏”（它不叫醒 AI、不动位置），只管“不要叫醒”。 */
+  ok('读不到氧气 + 刚下水（头在水下不到 10 秒）→ 先不叫醒（但 autoFloat 自己浮）',
+    sub0.agent.steers.length === 0,
     JSON.stringify({ s: sub0.agent.steers.length, j: jumped(sub0) }))
 
   // ⑧ 头在水下超过 10 秒 → 叫醒，文案照实说"读不到氧气、按头在水下判断"
@@ -1524,8 +1526,13 @@ section('autoFloat：落水自动上浮（与 move 无关、可关）')
   ok('高出水面 0.10 格就松手', /below < -0\.10/.test(autoSrc3))
   ok('快出水带冲速时提前松手（别冲过头）', /vy > 0\.20 && below < 0\.5/.test(autoSrc3))
   ok('按住 jump（走 holdCtl 统一口子，400ms 短脉冲）', /holdCtl\(sess, 'jump', 400/.test(autoSrc3))
-  ok('工具刚调完的 1.2 秒里让开（不跟 mc_move 的游泳段抢 jump）',
-    /t - num\(s\.lastToolAt, 0\) > 1_200/.test(autoSrc3))
+  /* 2026-10-29（用户：「自动上浮失效了」）：以前是“工具刚调完 1.2 秒就让开”，
+   * 只要 AI 在连着调工具（挖矿/打怪/观察）就永远让开 ⇒ 人一路沉底。
+   * 现在只看“游泳段是不是正在控 jump”（walkSwim 每拍写 `b.__swimCtlAt`）。 */
+  ok('让开只认“游泳段正在控 jump”（不再因为工具刚调完就让开）',
+    /const swimCtl = t - num\(b\?\.__swimCtlAt, 0\) < 600/.test(autoSrc3)
+    && /const ready = topY != null && eyeY != null && !swimCtl/.test(autoSrc3)
+    && !/t - num\(s\.lastToolAt, 0\) > 1_200/.test(autoSrc3))
   ok('这一段里不叫醒、不寻路（只有 holdCtl）',
     !/if \(beh\.autoFloat !== false\) \{[\s\S]{0,700}?(wakeForDanger|startWaterRecover)/.test(autoSrc3))
   ok('状态字段齐（floatAt / floatHeld / lastFloatLoggedAt）',

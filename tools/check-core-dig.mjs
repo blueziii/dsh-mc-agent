@@ -474,6 +474,37 @@ section('⑧ 只给坐标时 count 不生效（否则第二格会去挖"空气"�
     '不再用固定数组 for-循环遍历候选（那样中途没法重排）')
 }
 
+/* 🔴 2026-10-29 用户：「mc_dig · coal_ore 不挖脚底下的」（脚下的矿就是自己的支撑，以前一律拦）。
+ *   现在跟“往下走”对齐：≤ dropMax 格、落点实心、没液体 ⇒ 照挖。 */
+{
+  const { underfootRiskOf, UNDERFOOT_DROP_MAX } = await import('../src/mining.mjs')
+  const mkBot = (cells, hp = 20) => ({
+    health: hp,
+    entity: { position: { x: 0, y: 64, z: 0, floored: () => ({ x: 0, y: 64, z: 0 }) } },
+    blockAt: (q) => {
+      const k = `${q.x},${q.y},${q.z}`
+      return k in cells ? { name: cells[k] } : null
+    },
+  })
+  const at = (dy, name) => [`0,${64 - dy},0`, name]
+  const r1 = underfootRiskOf(mkBot(Object.fromEntries([at(2, 'air'), at(3, 'air'), at(4, 'stone')])), { x: 0, y: 63, z: 0 })
+  ok(r1?.bad === false && r1?.dropTo === 2, '脚下矿方下面是 2 格落差 ⇒ 照挖（掉 2 格落在实心上）', JSON.stringify(r1))
+  const r2 = underfootRiskOf(mkBot(Object.fromEntries([at(2, 'air'), at(3, 'air'), at(4, 'air'), at(5, 'air'), at(6, 'air'), at(7, 'stone')])), { x: 0, y: 63, z: 0 })
+  /* 🔴 2026-10-29：旧的“落差超过 ${UNDERFOOT_DROP_MAX} 格就拦”已废 ——
+   *   改成按摔落伤害判：摔不死就挖，会摔死才拦。 */
+  ok(r2?.bad === false && r2?.fallDamage > 0,
+    '落差大但摔不死 ⇒ 照挖（只回报 fallDamage）', String(r2?.why ?? '-') + ' dmg=' + String(r2?.fallDamage))
+  const r3 = underfootRiskOf(mkBot(Object.fromEntries([at(2, 'air'), at(3, 'lava'), at(4, 'stone')])), { x: 0, y: 63, z: 0 })
+  ok(r3?.bad === true && /lava/.test(String(r3?.why ?? '')), '下面是岩浆 ⇒ 拦并点名', String(r3?.why ?? ''))
+  const cells4 = Object.fromEntries([at(2, 'air'), at(3, 'air'), at(4, 'air'), at(5, 'stone')])
+  const r4 = underfootRiskOf(mkBot(cells4, 6), { x: 0, y: 63, z: 0 })
+  /* 血 < 10 时上限降到 3 格：3 格落差仍然放行，4 格才拦 */
+  ok(r4?.bad === false && r4?.dropTo === 3, '血量 < 10 时 3 格落差仍放行（上限 3）', JSON.stringify(r4))
+  const cells5 = Object.fromEntries([at(2, 'air'), at(3, 'air'), at(4, 'air'), at(5, 'air')])
+  const r5 = underfootRiskOf(mkBot(cells5, 6), { x: 0, y: 63, z: 0 })
+  ok(r5?.bad === true, '血量 < 10 时 4 格落差要拦', String(r5?.why ?? ''))
+}
+
 /* ─────────── 收尾 ─────────── */
 for (const d of TMP_DIRS) { try { rmSync(d, { recursive: true, force: true }) } catch {} }
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败'}：pass=${pass} fail=${fail}`)

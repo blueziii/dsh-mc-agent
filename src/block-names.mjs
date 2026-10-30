@@ -97,6 +97,15 @@ export const PLANT_PASSABLE = /^(?:wheat|carrots|potatoes|beetroots|torchflower_
  */
 export const TREE_BLOCK_RE = /_leaves$|_log$|_wood$|_hyphae$|^(crimson|warped)_stem$|^(brown|red)_mushroom_block$|^mushroom_stem$/
 export const isTreeBlock = (n) => Boolean(n) && TREE_BLOCK_RE.test(String(n))
+/* 🔴 2026-10-29：树要分两类用 ——
+ *   · **树叶**（`_leaves`）：碰撞箱整格、挖起来 0.2 秒。禁止挖它是错的：站在树冠上四面全是树叶时
+ *     就彻底无路可走（实机「出生在树上 → 困在竖井里」）。对树叶的正确做法是**加价**（`mv.dshBreakPenalty`），
+ *     平时绕路更便宜 ⇒ 不乱穿树；真没别的路时还能挖出去。
+ *   · **原木/菌柄/蘑菇块**：挖了树就塌、还可能砸下来，继续留在 `blocksCantBreak` 里，钉死不挖。 */
+export const LEAF_BLOCK_RE = /_leaves$/
+export const isLeafBlock = (n) => Boolean(n) && LEAF_BLOCK_RE.test(String(n))
+export const TREE_LOG_RE = /_log$|_wood$|_hyphae$|^(crimson|warped)_stem$|^(brown|red)_mushroom_block$|^mushroom_stem$/
+export const isTreeLog = (n) => Boolean(n) && TREE_LOG_RE.test(String(n))
 export const SOFT_ROOF = /_leaves$|_log$|_wood$|^bamboo|^snow|_snow$|cactus|^moss|^melon|^pumpkin|_sapling$|_flower$|^vine$|glow_lichen|^hanging_roots$|^big_dripleaf/
 
 /**

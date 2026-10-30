@@ -105,7 +105,7 @@ section('⑤ 六条路线图的关键件都还在')
   const mem = readFileSync(new URL('src/memory.mjs', ROOT), 'utf8')
   ok(/world\.md/.test(mem) && /lessons\.md/.test(mem) && /tasks\.md/.test(mem), '⑤ 四类记忆')
   const rt = readFileSync(new URL('src/runtime.mjs', ROOT), 'utf8')
-  ok(/export function requireBot \(self\)/.test(rt) && /export async function waitForChunks \(self/.test(rt), '④ 等区块 / 要在线 bot 在 runtime.mjs')
+  ok(/export function requireBot \(self/.test(rt) && /export async function waitForChunks \(self/.test(rt), '④ 等区块 / 要在线 bot 在 runtime.mjs')
   ok(/export function setAbortSignal \(self, signal\)/.test(rt) && /export async function interruptMove \(self/.test(rt), '⑥ 抢占 / 中断口都在')
 }
 

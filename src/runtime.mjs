@@ -247,12 +247,58 @@ export async function waitForChunks (self, timeoutMs = 20_000) {
     return r.ok
   }
 
-export function requireBot (self) {
+/**
+ * 要一个一定能干活的 bot；不行就报带原因的错。
+ * @param {object} self
+ * @param {{allowDead?: boolean}} [opts] `allowDead:true` —— 只读 / 只动嘴的工具用：
+ *   真死了更该能喊人、能看地图、能查状态。要拦的是“动世界”的动作。
+ */
+/**
+ * 死后重生。现在不自动重生（`createBot` 传了 `respawn: false`），由模型叫
+ * `mc_act { mode: "respawn" }` 决定什么时候重生；这里只负责发包 + 等世界确认。
+ * 回包≠结果：`bot.respawn()` 不报错不代表人回来了，必须看到 `isAlive === true` 且血量 > 0。
+ */
+export async function respawnNow (self) {
+  const b = requireBot(self, { allowDead: true })
+  if (b.isAlive === true && Number(b.health) > 0) {
+    return { ok: true, alreadyAlive: true, health: Number(b.health), text: '我还活着，不用重生' }
+  }
+  const died = self._life?.position ?? null
+  try { b.respawn() } catch (e) {
+    return { ok: false, why: 'respawn-send-failed', error: String(e?.message ?? e), text: `重生包发不出去：${String(e?.message ?? e)}` }
+  }
+  const r = await waitUntil(() => b.isAlive === true && Number(b.health) > 0, { ms: 3_000, pollMs: 150, label: '等重生' })
+  const p = b.entity?.position ?? null
+  const at = p ? { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) } : null
+  if (!r.ok) {
+    return { ok: false, why: 'no-respawn', sent: true, ...(at ? { at } : {}), text: '重生包发了，但 3 秒内没看到人回来。再叫一次试试，或者先看 mc_status。' }
+  }
+  return {
+    ok: true,
+    respawned: true,
+    ...(at ? { at } : {}),
+    ...(died && ['x', 'y', 'z'].every((k) => Number.isFinite(Number(died[k]))) ? { diedAt: { x: Math.round(died.x), y: Math.round(died.y), z: Math.round(died.z) } } : {}),
+    text: `重生了${at ? `（在 ${at.x}, ${at.y}, ${at.z}）` : ''}${died ? `。刚才死在 ${Math.round(died.x)}, ${Math.round(died.y)}, ${Math.round(died.z)}` : ''}`,
+  }
+}
+
+export function requireBot (self, { allowDead = false } = {}) {
     // ⚠️ 用 `online`（= 有身体 **且** 连接没结束）：只看 `bot.entity` 会把"被踢后的残留"当在线，
     //    于是所有世界工具对着死连接干等（2026-09-19 幽灵在线）。
     if (!self.online) {
       const ghost = self.bot?._client?.ended === true && self.bot?.entity
       throw new Error(`机器人不在线${ghost ? '（连接已结束，bot.entity 是残留，需要 mc_connect 重连）' : ''}${self.lastError ? '：' + self.lastError : ''}`)
     }
-    return self.bot
+    const b = self.bot
+    /* 2026-10-29（用户：「为什么现在 ai 死了好像不知道」）：死了没重生时，
+     * `bot.entity` 还在、`online` 还是 true，所以以前所有工具照常跑 —— 发出去的动作服务端一律不收，
+     * 只能报“走不动 / 没反应 / 时间到”。这里直接拦住，并把“死在哪”说清楚。 */
+    if (!allowDead && (b?.isAlive === false || Number(b?.health) <= 0)) {
+      const at = self._life?.position
+      const where = at && ['x', 'y', 'z'].every((k) => Number.isFinite(Number(at[k])))
+        ? `死在 (${Math.round(at.x)}, ${Math.round(at.y)}, ${Math.round(at.z)})`
+        : '死在哪没记下来'
+      throw new Error(`我已经死了（${where}，累计 ${self.stats?.deaths ?? 1} 次），还没重生 —— 发什么动作服务端都不收。要重生就叫 mc_act { mode: "respawn" }（掉落物 5 分钟后消失，要捻就重生后马上回去）；不想重生也可以先说话/看地图。`)
+    }
+    return b
   }

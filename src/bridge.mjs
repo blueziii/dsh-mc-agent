@@ -28,7 +28,7 @@ import vec3pkg from 'vec3'
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 
 import { sleep } from './async-util.mjs'
-import { isAir, isLiquid, canPlaceInto, isSolidBlock, isTreeBlock } from './block-names.mjs'
+import { isAir, isLiquid, canPlaceInto, isSolidBlock, isTreeBlock, isLeafBlock } from './block-names.mjs'
 import { pickPlaceItem } from './place-items.mjs'
 import { heldText } from './inventory.mjs'
 import { needLeft, insufficientText } from './budget.mjs'
@@ -92,13 +92,17 @@ export function avoidBlockIds (b) {
  * 拿去填 `movements.blocksCantBreak` —— 让 A* 不把"挖穿树"当成一条路（见 `TREE_BLOCK_RE`）。
  * 拿不到 registry（假 bot / 没连上）就回空数组。
  */
-export function treeBlockIds (b) {
+export function treeBlockIds (b, { leaves = true } = {}) {
   const out = []
   try {
     const arr = b?.registry?.blocksArray
     if (!arr) return out
     for (const blk of arr) {
-      if (blk && isTreeBlock(blk.name) && typeof blk.id === 'number') out.push(blk.id)
+      if (!blk || typeof blk.id !== 'number') continue
+      if (!isTreeBlock(blk.name)) continue
+      /* 🔴 2026-10-29：`leaves:false` 时只回原木那类（树叶改成“加价”，见 block-names 的 isLeafBlock）。 */
+      if (!leaves && isLeafBlock(blk.name)) continue
+      out.push(blk.id)
     }
   } catch { /* registry 形状不对就当没有 */ }
   return out

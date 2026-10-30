@@ -300,7 +300,8 @@ ok(/const noDig = args\.noDig !== false/.test(mcIndexSrc),
 const seqSrc = readFileSync(join(HERE, '..', 'src', 'sequence.mjs'), 'utf8')
 ok(/noDig: s\.noDig !== false/.test(seqSrc), 'mc_sequence 的 move 步骤默认也不挖（和 mc_move 一致）')
 /* 2026-10-27（用户：「把 mode swim 去掉」）：swim 分支删了，现在只剩 walk 这一条出口。 */
-ok(countOf(mcIndexSrc, 'noDig, noTower: args.allowTower !== true, intent: intentArgOf(args.intent)') === 1,
+ok(/noDig,[^}]*?noTower: args\.allowTower !== true[^}]*?intent: intentArgOf\(args\.intent\)/.test(mcIndexSrc)
+  && countOf(mcIndexSrc, 'walkWithAutoDig(sess, target,') === 1,
   'noDig 传进了走路调用（walk 那条；swim 分支已删）')
 /* 2026-10-25（用户：「move和dig如果没办法到那格应该自动切换成可破坏」）：
  *   walk 那条改走 `walkWithAutoDig` —— 先不挖走一遍，走不通自动改成挖穿挡路方块再走。 */
@@ -353,11 +354,16 @@ const treePlugSrc = readFileSync(join(HERE, '..', 'src', 'plugins.mjs'), 'utf8')
 const brSrc = readFileSync(join(HERE, '..', 'src', 'bridge.mjs'), 'utf8')
 ok(/export const TREE_BLOCK_RE =/.test(bnSrc) && /export const isTreeBlock =/.test(bnSrc),
   'block-names 有 TREE_BLOCK_RE / isTreeBlock（树这一类）')
-ok(/export function treeBlockIds \(b\)/.test(brSrc), 'bridge 有 treeBlockIds（拿 registry 里所有树的 id）')
-ok(/for \(const id of treeBlockIds\(b\)\) mv\.blocksCantBreak\.add\(id\)/.test(treePlugSrc),
-  '树被塞进 blocksCantBreak —— A* 不再把「挖穿树」当成一条路')
-ok(/const diggable = \(blk\) => diggableBlock\(blk\) && !isTreeBlock\(nameOf\(blk\)\)/.test(mvSrc),
-  '补挖（carveStepAhead）也不挖树 —— 我们自己那条腿同样不能爬树')
+ok(/export const isLeafBlock =/.test(bnSrc) && /export const isTreeLog =/.test(bnSrc),
+  '树再分两类：isLeafBlock（树叶）/ isTreeLog（原木）')
+ok(/export function treeBlockIds \(b, \{ leaves = true \} = \{\}\)/.test(brSrc),
+  'bridge 的 treeBlockIds 支持排除树叶（`{ leaves: false }`）')
+ok(/for \(const id of treeBlockIds\(b, \{ leaves: false \}\)\) mv\.blocksCantBreak\.add\(id\)/.test(treePlugSrc),
+  '只有**原木**被塞进 blocksCantBreak（树叶不在里面了）')
+ok(/mv\.dshBreakPenalty = pen/.test(treePlugSrc) && /walkLeafDigPenalty \?\? 6/.test(treePlugSrc),
+  '树叶改成“加价”：塞进 mv.dshBreakPenalty（默认 ×6，walkLeafDigPenalty 可调）')
+ok(/const diggable = \(blk\) => diggableBlock\(blk\) && !isTreeLog\(nameOf\(blk\)\)/.test(mvSrc),
+  '补挖（carveStepAhead）只禁原木，树叶可挖（被树叶围住时才有路）')
 ok(/isTreeBlock\(blockedAhead\.name\)/.test(mvSrc), '挡路的是树时，提示明说「别挖树」')
 
 ok(/if \(b\?\.vehicle && e === b\.vehicle\) continue/.test(mvSrc),
@@ -394,5 +400,12 @@ ok(/b\.pathfinder\.sneakWhenPlacing = false/.test(readFileSync(resolve(HERE, '..
   '我们自己把 sneakWhenPlacing 关掉了 —— 站着直接放，不蹲着贴边')
 ok(/放方块前不再蹲着贴边/.test(patchSrc),
   'patch-mc-deps 里有「不再蹲着贴边」这条补丁')
+
+/* 🔴 2026-10-31 用户实机：「allowTower 能上去的地方也会搭方块」。
+ *    上游 `placeCost` 默认 1 ⇒ 垫一格 = 多走 1 步，能跳上去、能绕两步的地方也去垫。
+ *    现在按“多绕 N 步”计价（默认 12）。 */
+ok(/mv\.placeCost = Number\(self\.cfg\.walkTowerCost \?\? 4\)/.test(plugSrc),
+  '垫一格的代价按“多绕 N 步”算（不是上游的 1）')
+ok(/walkTowerCost: 4/.test(coreSrc), 'cfg 里 walkTowerCost 默认 4（垫一格 ≈ 多走 4 步）')
 
 process.exit(fail === 0 ? 0 : 1)

@@ -1692,7 +1692,12 @@ export function createAuto ({ registry, logLine = () => {}, workspaceOf = null, 
       const topY = autoFloatTop(b, e)
       const eyeY = ap ? Number(ap.y) + 1.6 : null
       const vy = Number(e?.velocity?.y ?? 0)
-      const ready = topY != null && eyeY != null && t - num(s.lastToolAt, 0) > 1_200
+      /* 🔴 2026-10-29（用户：「自动上浮失效了」）：以前这里让开“工具刚调完的 1.2 秒”，
+       *    等于只要 AI 在连着调工具（挖矿/打怪/观察），autoFloat 就永远让开 ⇒ 人一路沉底。
+       *    用户早说过“和有没有 move 没关系”，这条让开恰恰背道而驰。
+       *    现在只看“游泳段是不是正在控 jump”（`movement.mjs` 的 `walkSwim` 每拍写 `b.__swimCtlAt`）。 */
+      const swimCtl = t - num(b?.__swimCtlAt, 0) < 600
+      const ready = topY != null && eyeY != null && !swimCtl
       const below = ready ? topY - eyeY : 0
       const overshoot = ready && vy > 0.20 && below < 0.5
       const rise = ready && below > 0.12 && !overshoot

@@ -626,7 +626,8 @@ section('⑩ interruptMove() —— 自保反射抢 AI 那一步的移动（"动
   ok(/const preempted = self\._moveGen !== gen/.test(movSrc), '收尾时先判断"我这一号还是不是最新的"（实现在 src\\movement.mjs）')
   ok(/const reasonOut = preempted \? 'preempted'/.test(movSrc) && /reason: reasonOut/.test(movSrc),
     '被抢占 → reason = preempted（其余 reason 走映射表，不漏 `Error`/`block_updated`，实现在 src\\movement.mjs）')
-  ok(/const noProgress = moved < 0\.6/.test(movSrc) && /是真没走通/.test(movSrc),
+  ok(/const noProgress = [^\n]*vRose < 0\.75[^\n]*moved < 0\.6/.test(movSrc)
+    && /是真没走通/.test(movSrc),   /* 2026-10-29：垂直也算进展，旧正则只认水平 */
     '一格没挪时如实说"真没走通"（不是"再叫一次就好"，实现在 src\\movement.mjs）')
   ok(/if \(self\._moveGen === gen\) \{/.test(movSrc), 'finally 里只有"还是最新一号"才停 pathfinder + 松控制位（实现在 src\\movement.mjs）')
   /* 🔴 2026-10-08 审计②③④⑦⑨：这五条是这一轮审计的**回归钉子**，谁把它们改回去谁红。 */

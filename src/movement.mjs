@@ -21,7 +21,8 @@ import { callBudget, callSecText, budgetSecText, CALL_BUDGET_MS, CALL_MS } from 
 import { inWaterNow, inLavaNow } from './world-observer.mjs'
 import { connectionStale } from './connection.mjs'
 import { heldText, invSnap, invUsed, canBreakNow, breakMsNow, toolKinds } from './inventory.mjs'
-import { isAir, isLiquid, isPassable, isSolidBlock, isTreeBlock, isWaterLike, isLavaLike } from './block-names.mjs'
+import { bestToolFor } from './dig-speed.mjs'
+import { isAir, isLiquid, isPassable, isSolidBlock, isTreeBlock, isTreeLog, isLeafBlock, isWaterLike, isLavaLike } from './block-names.mjs'
 import { BRIDGE_FATAL, heldSnapshotOf, restoreHeldOf } from './bridge.mjs'
 import { classifyTerrainCached } from './terrain.mjs'
 import { recoverFromWater } from './water-recovery.mjs'
@@ -126,6 +127,15 @@ export function standPointFor (b, x, y, z) {
   }
   /* ④ 实在没有：退回老规矩（本柱往下 4 格 / 往上 2 格，给"目标 y 在半空"兜底） */
   const sy = standableY(b, gx, gy, gz)
+  /* 🔴 2026-10-30 用户：「刚刚的坐标我看了一下，是半空中。怎么没有直接搭到坐标」——
+   *    整列都站不住时 `standableY` 会把原 y 原样退回，以前就当成“目标可站”交给 A*：
+   *    A* 眼里那一格是空气、站不上去 ⇒ 永远 NoPath ⇒ 六次重算后谎报“路线被作废”。
+   *    这里如实标 `noStand`，由上层决定“垫上去”还是“说清楚”。 */
+  /* 只对“**世界读得到**、且确实站不住”的目标下这个结论 —— 读不到方块（区块没加载 /
+   * 假 bot）时不能断言“它不可站”，否则会拿“没看见”当“没路”。 */
+  if (sy === gy && !canStandAtWorld(b, gx, gy, gz) && blockKnownAt(b, gx, gy - 1, gz)) {
+    return { x: gx, y: gy, z: gz, adjusted: false, noStand: true, from: { x: gx, y: gy, z: gz } }
+  }
   return { x: gx, y: sy, z: gz, adjusted: sy !== gy, from: sy !== gy ? { x: gx, y: gy, z: gz } : undefined }
 }
 
@@ -527,6 +537,10 @@ export async function walkSwim (self, target, { arrive = 1.6, budget = self.cfg.
       const eyeY = Number(b?.entity?.position?.y ?? me.y) + 1.6
       try { await b.lookAt(new Vec3(goal.x, eyeY, goal.z), true) } catch { /* 假 bot 没有 lookAt */ }
       b.setControlState('forward', true)
+      /* 2026-10-29（用户：「自动上浮失效了」）：给反射层留个“游泳段正在控 jump”的时间戳。
+       * 反射层以前靠“工具刚调完 1.2 秒就让开”避让 —— 等于只要 AI 在连着调工具（挖矿/打怪/观察），
+       * autoFloat 就永远让开 ⇒ 人一路沉底。现在它只看这个时间戳。 */
+      try { b.__swimCtlAt = Date.now() } catch { /* 假 bot 没这个字段 */ }
       /* 🔴 2026-10-27 起：游泳段**一律按 jump**（`swimJumpWanted` 恒 true），不再"目标在下面就松手
        *    沉下去" —— 那条规则会把"要上岸"误判成"要沉底"。`jumpOverride` 只在纠偏那一轮反向生效。 */
       const wantJump = jumpOverride === null ? swimJumpWanted(b, goal, me, airOf()) : jumpOverride
@@ -817,8 +831,8 @@ async function walkToInner (self, target, opts = {}, ctx = {}) {
   return out
 }
 
-async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, noTower = true, towerFallback = true, intent = 'near', waterRecover, noDig = false, xz = false } = {}, ctx = {}) {
-  let info = await walkToOnce(self, target, { arrive, budget, noTower, towerFallback, intent, waterRecover, noDig, xz }, ctx)
+async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, noTower = true, noBridge = true, towerFallback = true, intent = 'near', waterRecover, noDig = false, xz = false } = {}, ctx = {}) {
+  let info = await walkToOnce(self, target, { arrive, budget, noTower, noBridge, towerFallback, intent, waterRecover, noDig, xz }, ctx)
   /* 🔴 2026-10-20（实机连撞两次）：vendor 的 `goal_reached` 是**全局**事件（`lib/goto.js:60` 不看 goal），
    *    别的寻路（自主层逃跑/跟随、或者上一次走路的残留 promise）到点时会顺手把**我这次** goto 一起
    *    resolve ⇒ 本次调用 45~85ms 就返回 goal-reached-elsewhere，人一步没动。以前只能让 AI 再手动叫
@@ -826,7 +840,7 @@ async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.
    *    NoPath / stuck / call-over 重试是同参数撞墙，没意义。 */
   if (!info.arrived && info.reason === 'goal-reached-elsewhere' && self.msLeft() > 1_200) {
     try { ctx.stopPathing?.(self.requireBot()) } catch {}
-    const retried = await walkToOnce(self, target, { arrive, budget, noTower, towerFallback, intent, waterRecover, noDig, xz }, ctx)
+    const retried = await walkToOnce(self, target, { arrive, budget, noTower, noBridge, towerFallback, intent, waterRecover, noDig, xz }, ctx)
     info = { ...retried, retriedElsewhere: true }
   }
   /* 🔴 2026-10-23（P0-b，用户 m00634）：以前 `arrived:false` 只说"还差 N 格"（直线）——
@@ -934,7 +948,7 @@ async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.
   return pruneMove(outInfo)
 }
 
-async function walkToOnce (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, noTower = true, towerFallback = true, intent = 'near', waterRecover, noDig = false, xz = false } = {}, ctx = {}) {
+async function walkToOnce (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, noTower = true, noBridge = true, towerFallback = true, intent = 'near', waterRecover, noDig = false, xz = false } = {}, ctx = {}) {
   const b = self.requireBot()
   endHoverFlight(b)   // 悬停着就别想蹦/走：先恢复重力（否则走路全废，见 endHoverFlight）
   /* 🔴 2026-10-19 用户：「水下自救要让 ai 能开关」+「要默认开」——
@@ -1085,6 +1099,7 @@ async function walkToOnce (self, target, { arrive = 1.6, budget = self.cfg.moveB
   const pfOut = await ctx.walkPathfinder(target, {
     arrive,
     noTower,
+    noBridge,
     towerFallback,
     noDig,
     intent,
@@ -1375,7 +1390,7 @@ export const MOVE_JUMP_MS = 320         // 跳跃脱困按住 jump 多久
  *      · `MOVE_CARVE_DIG_MS` —— 单格挖掘/换工具的上限，到点松手，别把整趟走路一起拖死。
  *    ⚠️ 硬上限只是**兜底**：正常路径永远先在预算内自己结束，不许拿它当主超时。 */
 export const MOVE_HARD_SLACK_MS = 3_000
-export const MOVE_CARVE_DIG_MS = 3_000
+export const MOVE_CARVE_DIG_MS = 3_000   // 单格挖掘守卫的**下限**；实际取 max(它, 实测挖掘时间+1.2s)（空手挖石头 7.5 秒）
 export const MOVE_BACK_MS = 420         // 后退脱困按住 back 多久
 /* P1：一次 `goto` 里路径被**失效**这么多次 ⇒ 别再等"没进展"了，直接进脱困阶梯。
  * 依据：vendor 自己会在 3.5s 无节点进展时 `resetPath('stuck')`，但它只会**重算同一条**；
@@ -1401,8 +1416,16 @@ export const MOVE_VENDOR_STUCK_MS = 3_500
  *   悬空挂在柱子顶上（`pillared:N`）时，重算/跳/后退/绕行/垫柱全无效：头顶那格实心，
  *   跳起来撞头、A* 也规划不出"上得去"的路，整轮只能超时。
  *   位置在 jump 之后、backoff 之前：先确认"跳也白跳"再动镐，代价是一格方块。 */
-export const MOVE_ESCAPES_NODIG = ['repath', 'jump', 'clearHead', 'backoff', 'detour']
-export const MOVE_ESCAPES_DIG = ['repath', 'jump', 'breakAhead', 'backoff', 'detour']
+export const MOVE_ESCAPES_NODIG = ['repath', 'jump', 'descend', 'clearHead', 'backoff', 'detour']
+/* 2026-10-29（用户：目标在头顶 10 格，工具却只报“前方 stone 挡着、挖开它”）：
+ *   往上走（`climbUp`）以前**只挂在“A* 空路径”那条分支**上。真正的常见情形是 A* 给了
+ *   一条到附近的路、走到墙前卡住 —— 那条路走的是这套阶梯，而阶梯里根本没有“往上挖”。
+ *   于是要爬高时永远只跳一下、再挖眼前一格，10 格的目标一层都上不去。
+ *   加在 `jump` 之后（先确认“跳也白跳”再动镐）、`breakAhead` 之前（挖眼前那格不如往上挖）。 */
+/* 2026-10-29（用户：「move 还是不会自己上下」）：阶梯里以前只有“往上挖”（climbUp），**没有“往下走”** ——
+ *   目标在脚下 10 格时它去试上台阶，回来只报“前方脚下是 stone（没有两格高）”，方向都错了。
+ *   `descend` 放在 jump 之后、climbUp 之前：两者按目标方向互斥，谁匹配谁动。 */
+export const MOVE_ESCAPES_DIG = ['repath', 'jump', 'descend', 'climbUp', 'breakAhead', 'backoff', 'detour']
 /** 默认阶梯 = 允许挖那套（保留旧名，调用方与测试仍在用）。 */
 export const MOVE_ESCAPES = MOVE_ESCAPES_DIG
 /** 这一趟该用哪套阶梯（`noDig === true` 时不含 breakAhead）。 */
@@ -1889,7 +1912,11 @@ export function aboveOf (b) {
 export const MOVE_CARVE_CELLS = 2       // 一次最多往前看几格
 export const MOVE_CARVE_TRIES = 2       // 一次 walkPathfinder 里最多补挖几次
 export const MOVE_CARVE_RESETS = 4      // 挖开挡路方块之后"阶梯清零重走"最多几次（防挖了又挖不认输）
-export const MOVE_CARVE_TOTAL = 6       // 一次 mc_move 里总共最多补挖几格（挖几十格还走不动 = 方向搞错了，该交给 AI 决定）
+/* 🔴 2026-10-31 用户：「move 应该能直接移动到任意地方」——
+ *   原来写死 6 格：从 y=40 挖阶梯上到地表（差 30 层、要挖 60 格）永远到不了，
+ *   每次调用挖够 6 格就弃。真正的限制本来就是**时间**（10 秒能挖多少算多少），
+ *   这个数只当“方向明显搞错”的安全沐。 */
+export const MOVE_CARVE_TOTAL = 24      // 一次 mc_move 里总共最多补挖几格（时间才是真限制）
 /* ══ 执行顺序（2026-10-23 用户：「动不了，太容易卡了，你要加对应的执行顺序」）════════
  * 卡住之后**先试便宜的、能绕就不拆**，一级一级往下走；每级都写进日志和结果
  * （`planStep` / `planTried`），AI 和人都看得出"现在试到第几步、下一步该换什么"：
@@ -1912,11 +1939,11 @@ export const MOVE_CARVE_TOTAL = 6       // 一次 mc_move 里总共最多补挖�
  * ⚠️ 跨调用也要接着升：同一个目标 90 秒内再叫，从上次卡住的那一级继续（`b._movePlan`），
  *    否则每次 `mc_move` 都从第 1 级重来 —— AI 连叫五次就白试五遍同一套。
  */
-export const MOVE_PLAN_NODIG = ['door', 'repath', 'jump', 'clearHead', 'backoff', 'detour', 'tower']
+export const MOVE_PLAN_NODIG = ['door', 'repath', 'jump', 'descend', 'clearHead', 'backoff', 'detour', 'tower']
 /* 🔴 2026-10-28（用户：「move 在上面的时候自动挖不行吗」）：挖的趟原来**没有** `clearHead`
  *    —— 只有不挖的趟才有。而被自己垫的柱子顶进 1×1 竖井时，挡路的是**正上方**那格，
  *    水平方向的 `breakAhead` 根本够不着 ⇒ 挖的趟也补上这一级。 */
-export const MOVE_PLAN = ['door', 'repath', 'jump', 'breakAhead', 'clearHead', 'backoff', 'detour', 'tower']
+export const MOVE_PLAN = ['door', 'repath', 'jump', 'descend', 'climbUp', 'breakAhead', 'clearHead', 'backoff', 'detour', 'tower']
 /** 这一趟的执行顺序（日志里报"第几步/共几步"用；与 `escapeStepsFor` 必须同源）。 */
 export function movePlanFor (noDig) {
   return noDig === true ? MOVE_PLAN_NODIG : MOVE_PLAN
@@ -1928,6 +1955,8 @@ export const MOVE_PLAN_TEXT = {
   clearHead: '清掉自己头顶那格',
   backoff: '后退再寻路',
   detour: '侧向绕行',
+  descend: '往下挖一层（或往下跳）',
+  climbUp: '往上挖一层再跳',
   breakAhead: '挖开挡路那格再走',
   tower: '垫一格往上',
 }
@@ -1938,6 +1967,8 @@ export const MOVE_DETOUR_R = 3          // 侧向绕行偏离直线几格
 export const MOVE_DETOUR_MS = 1_600     // 单次绕行最多走多久
 /* 脱困阶梯的预算余量：剩这么点时间就别再升一级了（一级最坏要 3.5 秒 vendor stuck + 动作）。 */
 export const MOVE_ESCALATE_MIN_MS = 600
+/* 🔴 2026-10-31：“目标被重设”这类良性打断最多原地续跑这么多次（不占 autoRepath 额度）。 */
+export const MOVE_KICK_MAX = 40
 /* 🔴 2026-10-27（用户：「移动老是卡在半空，脚踩实地又杵着不动」）：
  *   vendor 的 `goto` 会在**任何**一次 `resetPath` 上 reject —— `resetPath()` 里
  *   `if (stopPathing) return stop()`，而 goto 期间 `stopPathing` 恒为 true，`stop()` 又先把
@@ -2013,9 +2044,18 @@ export function moveCauseTextOf (o) {
     const openS = Array.isArray(sh.openSides) ? sh.openSides : []
     const head = sh.headroom === 0
       ? `头上就是 ${sh.ceiling ?? '实心'}（跳不起来）`
-      : `头顶 ${sh.headroom} 格净空`
-    return `困在竖井里（${head}；${openS.length ? `只有 ${openS.join('/')} 那面通` : '四面全堵着'}`
-      + `${Number(sh.pillar) > 0 ? `；背包里有 ${sh.pillar} 个能垫的方块` : ''}）`
+      : `头顶 ${sh.headroom} 格开阔`
+    /* 🔴 2026-10-29 实机（用户：「是在树冠上，没有被包围」）：
+     *   旧文案写“困在竖井里（头顶 7 格净空；只有 n/e/s/w 那面通）”——
+     *   头顶开阔、只有一面通，根本不是竖井；而且“n/e/s/w”把“到底哪面、挡着的是什么”全省了，
+     *   模型只能去猜。现在只报事实：四周是什么方块、哪面通、头上多高。 */
+    const blocked = Object.keys(sh.sides ?? {}).filter((k) => !openS.includes(k))
+    const wallNames = [...new Set(blocked.map((k) => String(sh.sides?.[k] ?? '')).filter((n) => n && n !== '?'))]
+    const leafWall = wallNames.some((n) => isLeafBlock(n))
+    const what = wallNames.length ? `四周是 ${wallNames.join('/')}` : '四周全是实心方块'
+    return `${what}（${head}；${openS.length ? `${openS.join('/')} 那面通` : '四面都不通'}）`
+      + `${leafWall ? '——树叶 0.2 秒就能挖掉，挖开就能过去' : ''}`
+      + `${Number(sh.pillar) > 0 ? `；背包里有 ${sh.pillar} 个能垫的方块` : ''}`
   }
   const r = String(o.reason ?? '')
   if (r === 'NoPath') return '没有能走通的路'
@@ -2026,17 +2066,53 @@ export function moveCauseTextOf (o) {
   if (r === 'walk-hung') return '服务端不回包（不是路不通）'
   if (r === 'timeout') return '这一轮的走路时间用完了'
   if (r === 'stuck') return '原地走不动'
-  return r || '走不动'
+  /* 🔴 2026-10-31 用户实机：只回一句「走不动：preempted」—— 把内部事件名当成了给模型看的原因。
+   *     `preempted` = 另一次移动（自动上浮 / 另一个工具 / 上一趟残留）抢走了控制位，**不是路不通**。 */
+  if (r === 'preempted') return '被别的动作打断了（不是走不通）'
+  /* 🔴 2026-10-31 用户实机：「现在一直 mc_say · path-reset」—— 又一个内部码裸奔到模型面前，
+   *    模型只好一遍遍把它念出去。`path-reset`/`PathStopped` = 路线中途作废（方块变了/目标被改），
+   *    不是路不通。 */
+  if (r === 'path-reset' || r === 'PathStopped') {
+    /* 🔴 2026-10-31 用户：「这个为什么去不了」—— 只说“路线作废”等于没说。
+     *   把 `pathResetReasons`（每次作废是**谁**触发的）翻成人话报前两位：
+     *   垫方块被拒 / 挖的时候出错 / 手上没方块 / 原地卡住 …… 模型才知道该换目标还是先补材料。 */
+    const NAMED = {
+      place_error: '垫方块被服务端拒了', place_jump_timeout: '垫方块卡在半空',
+      equip_error: '换工具失败', dig_error: '挖的时候出错', dig_equip_error: '挖之前换工具失败',
+      dig_timeout: '挖那块超时', use_block_error: '开门/按钮出错',
+      no_scaffolding_blocks: '手上没有能垫的方块', stuck: '原地卡住',
+      goal_moved: '目标动了', block_updated: '路过的方块变了', chunk_loaded: '区块刚加载',
+      goal_updated: '目标被重设了（有别的动作在抢寻路）', movements_updated: '寻路参数被改了一次',
+    }
+    const rs = o?.pathResetReasons && typeof o.pathResetReasons === 'object' ? o.pathResetReasons : null
+    const top = rs ? Object.entries(rs).sort((a, b) => b[1] - a[1]).slice(0, 2) : []
+    const whyText = top.length
+      ? '：' + top.map(([k, n]) => `${NAMED[k] ?? k} ${n} 次`).join('、')
+      : (o?.lastReset ? `：${NAMED[o.lastReset] ?? o.lastReset}` : '')
+    return `路线中途作废了${whyText}，重算过几次还是没走到`
+  }
+  if (r === 'block-changed') return '路被方块变动打断了（不是走不通）'
+  if (r === 'budget' || r === 'swim-budget') return '这一轮的时间用完了'
+  if (r === 'unreachable') return '那片地方进不去'
+  if (r === 'progress') return '还在路上'
+  /* 兜底：**不许把内部码直接给模型看**（原始值留在结果的 `reason` 里给排查用）。 */
+  return '这一步没走到'
 }
 
 /** 一句话说下一步该怎么办。 */
 export function moveNextTextOf (o, stuck) {
   if (!stuck) return '继续往同一目标走（再叫一次 mc_move 就行）'
   const r = String(o.reason ?? '')
+  /* 被抢占不是走不通：人还在半路，直接再叫一次就接着走（旧文案说“换个目标点”，方向全错）。 */
+  if (r === 'preempted') return '直接再叫一次 mc_move 接着走（被抢占不算走不通）；若反复被抢，先看是不是 mc_auto 的自动动作在抢'
   if (o.fell) return `先爬回 y=${Math.round(Number(o.fell.from?.y ?? 0))} 那一层，别在边缘垫方块`
   if (o.dead) return '等复活站回地面再叫 mc_move——这趟不算“走不通”'
   if (o.airborne && o.airborne.still === true) return '先落到实地再走，别原地跳'
-  if (o.blockedAhead) return '挖开挡路那格，或换个目标点'
+  if (o.blockedAhead) {
+    /* 🔴 2026-10-31：前方是沟/缺口时，“挖开挡路那格”是错的建议（沟挖不出路）。 */
+    if (o.terrain === 'gap') return '前方是沟/缺口（挖不出路来）—— 要横着垫过去就带 allowBridge:true 再叫一次，或者换个能绕过去的目标点'
+    return '挖开挡路那格，或换个目标点'
+  }
   /* 竖井：不能只说“换个目标点”—— `shaftInfoOf` 已经量出了哪面通、头上是什么，
    *   按它说就行（用户 2026-10-29 实机：只报“困在竖井里”没给路，AI 只能瞎试）。 */
   if (o.shaft) {
@@ -2053,8 +2129,17 @@ export function moveNextTextOf (o, stuck) {
   if (r === 'waiting_chunks') return '等区块加载后再叫一次'
   if (r === 'lava') return '绕开岩浆'
   if (r === 'goal-not-standable') return '换一个能站的落点'
+  if (r === 'path-reset' || r === 'PathStopped' || r === 'block-changed') {
+    return '直接再叫一次 mc_move 接着走（路线被作废不算走不通）；反复作废就换个明显好走的目标点'
+  }
+  if (r === 'budget' || r === 'swim-budget') return '时间到了，直接再叫一次接着走'
+  if (r === 'unreachable') return '那片区域进不去，换个目标点'
+  /* 空手挖石头 7.5 秒：不是走不通，是这轮时间不够挖完一块。 */
+  if (Array.isArray(o.planTried) && o.planTried.includes('tooSlow')) {
+    return '挖一块要好几秒（空手挖石头 7.5 秒）—— 这轮时间被它吃掉了，直接再叫一次 mc_move 接着挖，别换目标'
+  }
   if (Array.isArray(o.planTried) && o.planTried.includes('breakAhead')) return '挖也没用，换路线或换落点'
-  return '换个目标点，或先改一下环境再试'
+  return '直接再叫一次 mc_move 接着走；还不行就换个明显好走的目标点'
 }
 
 /** `mc_move` 给模型看的那一行（与 `briefMoveOf` 配套，永远一句话）。 */
@@ -2074,6 +2159,8 @@ export function escapeTextOf (step) {
     : step === 'jump' ? '跳跃脱困'
       : step === 'backoff' ? '后退再寻路'
         : step === 'detour' ? '侧向绕行再算'
+          : step === 'descend' ? '往下挖一层（或往下跳）'
+          : step === 'climbUp' ? '往上挖一层再跳'
           : step === 'breakAhead' ? '挖开挡路那格再走'
           : '放弃'
 }
@@ -2153,15 +2240,28 @@ export function obstacleAheadOf (b, target, { cells = MOVE_CARVE_CELLS } = {}) {
  * @returns {Promise<boolean>} 真挖开了吗
  */
 export async function digOneGuarded (b, blk, { digMs = MOVE_CARVE_DIG_MS } = {}) {
+  /* 🔴 2026-10-30（B）：我们绕过 pathfinder 自己挖的，先登记给 vendor —— 否则那一格的变化
+   *    会触发 blockUpdate ⇒ resetPath('block_updated') ⇒ 整条路白走。 */
+  try { b?.pathfinder?.markExpected?.(blk?.position) } catch { /* vendor 没这接口就跳过 */ }
+  /* 🔴 2026-10-31 用户实机：`{budgetMs:8000, digThrough:true, noDig:false, x:-29,y:50,z:75}`
+   *    回“前方 -31,50,90 的脚下是 stone（没有两格高）”—— 说好的允许挖，结果一格没挖。
+   *    真因：单格挖掘守卫写死 3000ms，而**空手挖石头要 7.5 秒** ⇒ 每一下都在 3 秒被掀断、
+   *    进度归零，永远挖不开。现在按**实测挖掘时间 + 1.2 秒余量**给上限。 */
+  /* 测不出掘时间（旧数据 / 假 bot / 无硬度）就不放大 —— 保持传入的下限。 */
+  const ms0 = Number(breakMsNow(b, blk))
+  const needMs = Number.isFinite(ms0) && ms0 > 0 ? ms0 + 1_200 : 0
+  const guardMs = Math.max(Number(digMs) || 0, needMs)
   const guarded = async (p) => {
     const TO = Symbol('timeout')
     const r = await Promise.race([
       Promise.resolve(p).then(() => true, () => false),
-      sleep(digMs).then(() => TO),
+      sleep(guardMs).then(() => TO),
     ])
     if (r !== TO) return r
     try { b.stopDigging?.() } catch {}
     try { b.__carveDigStalled = (Number(b.__carveDigStalled) || 0) + 1 } catch {}
+    /* 被守卫掀断而且确实是“这块要很久”：记下来，文案里能说出具体秒数 */
+    try { b.__carveTooSlow = { name: String(blk?.name ?? '?'), needMs: Math.round(needMs) } } catch {}
     return false
   }
   try {
@@ -2194,11 +2294,56 @@ export async function clearHeadCell (b, { digMs = MOVE_CARVE_DIG_MS, levels = 2 
        *    （用它会 ReferenceError，被 catch 吞掉 ⇒ 静默返回 0，2026-10-28 踩过）。 */
       const n = (() => { try { return blk?.name ?? null } catch { return null } })()
       if (!n || !isSolidBlock(n)) continue
-      if (!diggableBlock(blk) || isTreeBlock(n) || CARVE_PROTECTED.test(n)) continue
+      if (!diggableBlock(blk) || isTreeLog(n) || CARVE_PROTECTED.test(n)) continue
       if (await digOneGuarded(b, blk, { digMs })) dug++
     }
     return dug
   } catch { return 0 }
+}
+
+/* 🌉 自动搭路（2026-10-29 用户：「allowBridge 是新功能，允许自动搭路。和之前的没关系」）
+ *
+ * A* 只会走"现成的地面"：遇到悬崖、沟、断桥，它直接报 NoPath。挖也挖不过去（对面没东西
+ * 可挖）时，唯一的出路就是**自己铺一条路**。`mc_act{mode:"bridge"}` 早就有这套（`src/bridge.mjs`
+ * 负责安全判定：悬空/区块没加载/血量<8 停、岩浆深空只警告），这里只是把它接进走路。
+ *
+ * 只走直线（`bridge.mjs` 的规矩：斜着铺每一步都够不着依附面）；铺完之后桥面就成了真地形，
+ * 下一轮 A* 立刻能用。 */
+export const MOVE_BRIDGE_TRIES = 3
+export const MOVE_BRIDGE_STEPS = 4
+export const MOVE_BRIDGE_MIN_HEALTH = 8
+
+export async function bridgeToward (self, b, target, { maxSteps = MOVE_BRIDGE_STEPS } = {}) {
+  if (typeof b?.bridge !== 'function') return { ok: false, why: 'unavailable' }
+  const p = b?.entity?.position
+  if (!p) return { ok: false, why: 'no-entity' }
+  const fx = Math.floor(p.x); const fz = Math.floor(p.z)
+  const tx = Math.floor(Number(target?.x)); const tz = Math.floor(Number(target?.z))
+  if (!Number.isFinite(tx) || !Number.isFinite(tz)) return { ok: false, why: 'bad-target' }
+  const dx = tx - fx; const dz = tz - fz
+  /* 斜的目标：先走下去，走到同一行/列再来搭 —— 硬铺会每格都够不着依附面。 */
+  if (dx && dz) return { ok: false, why: 'not-straight' }
+  const span = Math.abs(dx) + Math.abs(dz)
+  if (span < 1) return { ok: false, why: 'too-close' }
+  const n = Math.min(Math.max(1, Math.floor(maxSteps) || 1), span)
+  const dir = { dx: Math.sign(dx), dz: Math.sign(dz) }
+  const dirName = dx ? (dx > 0 ? '东(+x)' : '西(-x)') : (dz > 0 ? '南(+z)' : '北(-z)')
+  let r = null
+  try {
+    r = await b.bridge({ dir, count: n, minHealth: MOVE_BRIDGE_MIN_HEALTH })
+  } catch (e) {
+    return { ok: false, why: 'error', note: String(e?.message ?? e), dirName }
+  }
+  const placed = Number(r?.placed ?? r?.count ?? 0)
+  return {
+    ok: r?.ok !== false && placed > 0,
+    placed,
+    n,
+    dirName,
+    why: r?.ok === false ? (r?.stopped ?? r?.why ?? 'failed') : null,
+    note: r?.note ?? r?.hint ?? null,
+    raw: r,
+  }
 }
 
 export async function carveStepAhead (b, target, { cells = MOVE_CARVE_CELLS, radius = MOVE_CARVE_RADIUS, ignoreRange = false, digMs = MOVE_CARVE_DIG_MS, only = null, upLevels = 3 } = {}) {
@@ -2231,7 +2376,7 @@ export async function carveStepAhead (b, target, { cells = MOVE_CARVE_CELLS, rad
   /* 🔴 2026-10-24 用户实机：「现在寻路老是会跑到树上」。A* 那边已经把树列进 `blocksCantBreak`，
    *    但**我们自己的补挖**（卡住时挖开眼前那格）不归 A* 管 —— 它照样会把树叶挖穿，
    *    于是又爬上去了。这里补上同一条线：树不挖（要砍树请 AI 自己 `mc_dig` 指名砍）。 */
-  const diggable = (blk) => diggableBlock(blk) && !isTreeBlock(nameOf(blk))
+  const diggable = (blk) => diggableBlock(blk) && !isTreeLog(nameOf(blk))
   /* 方向：先主轴（离得远的那个轴），再另一条轴 —— 斜着走楼梯时两条都要看。 */
   const sx = Math.sign(dx), sz = Math.sign(dz)
   /* 🔴 2026-10-23 实机（用户："它往 z5 挖而不是 x方向"）：方向**只认主轴**（离得远的那个轴），
@@ -2257,6 +2402,21 @@ export async function carveStepAhead (b, target, { cells = MOVE_CARVE_CELLS, rad
    *   服务端不回包就永远挂着 ⇒ 整次 `mc_move` 卡死（预算只包着 `pathfinder.goto`）。
    *   那份"每个动作都有上限、到点 `stopDigging()` 松手"的实现现在在模块级
    *   `digOneGuarded` 里 —— `carveStepAhead` 与脱困阶梯的 `clearHead` 共用同一份。 */
+  /* 🔴 2026-10-31 实机（用户：“我放了一层泥土，下面是玻璃包围的钻石矿。它站在泥土上，它只挖玻璃，不挖泥土”）：
+   *   清障这条路**从来不换工具** —— 刚挖完玻璃，手上还是玻璃/空手，
+   *   于是石头全被判“挖不动”（空手挖石头 7.5 秒 > 阀值），一格都挖不下去。
+   *   换不上就算了，后面照旧判。 */
+  try {
+    let pb = only ? at(Math.floor(Number(only.x)), Math.floor(Number(only.y)), Math.floor(Number(only.z))) : null
+    if (!pb || pb.boundingBox !== 'block') {
+      const o = obstacleAheadOf(b, target)
+      pb = o ? at(o.x, o.y, o.z) : null
+    }
+    if (pb && pb.boundingBox === 'block' && !canBreakNow(b, pb)) {
+      const best = bestToolFor(b, pb)
+      if (best?.item && b.heldItem?.type !== best.item.type) await b.equip(best.item, 'hand')
+    }
+  } catch { /* 换不上就照旧 */ }
   const digOne = (blk) => digOneGuarded(b, blk, { digMs })
   /* 🔴 2026-10-24 审计（用户第二份）：调用方已经用 `obstacleAheadOf` 指出了**具体那一格**，
    *    就别再自己扫一遍 —— 重扫出来的可能不是那一块，日志里说"眼前 X 挡路"、实际挖的却是
@@ -2949,7 +3109,58 @@ export async function stepUp (b, target, { allowDig = true, ctx = null, cells = 
   }
 }
 /** 往上走要填空的头位数（2 格：脚位 + 头位）；跳起来还要顶上一格净空。 */
-export const MOVE_UP_TRIES = 8
+/* 2026-10-29：一次步只升 1 层，8 次上限连 8 格都上不去 ⇒ 提到 12。 */
+export const MOVE_UP_TRIES = 12
+/** 一次 mc_move 里最多补挖几次“头顶挡着垫不了柱”（挖开头顶再让 A* 垫）。 */
+export const MOVE_HEAD_TOWER_TRIES = 3
+
+/** A* 下一步要**垫方块往上**、而头顶那两格又堵着？堵着就返回那块的名字。
+ *  🔴 2026-10-31 用户：「垫柱子这个为什么现在不能自己挖 2 格然后垫」。
+ *  上游 `getMoveUp` 只会“头顶本来就空”时才生成垫柱动作，**它自己不挖**；
+ *  而它一旦生成了这个动作，A* 就以为“有路” ⇒ 既不进 NoPath 分支、也进不了脱困阶梯。 */
+export function towerHeadBlocked (b) {
+  try {
+    const path = b?.pathfinder?.path
+    if (!Array.isArray(path) || path.length < 2) return null
+    const n = path[1]
+    if (!n || !Array.isArray(n.toPlace) || n.toPlace.length === 0) return null
+    const e = b?.entity?.position
+    if (!e) return null
+    const fx = Math.floor(e.x), fy = Math.floor(e.y), fz = Math.floor(e.z)
+    for (const dy of [1, 2]) {
+      const blk = b.blockAt(new Vec3(fx, fy + dy, fz))
+      if (blk && blk.boundingBox === 'block') return String(blk.name ?? '方块')
+    }
+    return null
+  } catch { return null }
+}
+
+/** 把头顶两格挖开，好让 A* 垫柱子上去。返回挖掉几格。 */
+export async function clearHeadForTower (b, { ctx = null, digMs = MOVE_CARVE_DIG_MS } = {}) {
+  const e = b?.entity?.position
+  if (!e) return 0
+  const fx = Math.floor(e.x), fy = Math.floor(e.y), fz = Math.floor(e.z)
+  let dug = 0
+  for (const dy of [1, 2]) {
+    let blk = null
+    try { blk = b.blockAt(new Vec3(fx, fy + dy, fz)) } catch { blk = null }
+    if (!blk || blk.boundingBox !== 'block') continue
+    const nm = String(blk.name ?? '')
+    if (!nm || isLiquid(nm) || BRIDGE_FATAL.test(nm)) continue
+    if (blk.hardness === -1 || blk.hardness === Infinity) continue
+    if (!canBreakNow(b, blk)) {
+      try {
+        const best = bestToolFor(b, blk)
+        if (best?.item && b.heldItem?.type !== best.item.type) await b.equip(best.item, 'hand')
+      } catch { /* 换不上就照旧判 */ }
+      if (!canBreakNow(b, blk)) continue
+    }
+    try { if (await digOneGuarded(b, blk, { digMs })) dug++ } catch { /* 忽略 */ }
+  }
+  return dug
+}
+/** 一次调用里连续往上挖几层（每层都要挖 2 格 + 跳，太多会吃光预算）。 */
+export const MOVE_CLIMB_LEVELS = 12      // 一次连续往上挖几层（受预算限制；旧值 4 太短，30 层的洞要叫十几次）
 const CLIMB_UP_MS = 700
 const CLIMB_LIFT_MS = 900
 
@@ -2960,62 +3171,78 @@ const CLIMB_LIFT_MS = 900
  * 安全边界与 stepDown 一致：流体不挖、受保护方块不挖、落脚面必须实心，
  * 挖完真上去了才算成功（不看回包、看坐标）。
  */
-export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CLIMB_UP_MS, digMs = MOVE_CARVE_DIG_MS } = {}) {
-  const start = b?.entity?.position
-  if (!start) return { tried: false, why: 'no-bot' }
+export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CLIMB_UP_MS, digMs = MOVE_CARVE_DIG_MS, maxLevels = 1 } = {}) {
+  /* 2026-10-29（用户：目标在头顶 10 格、y=42 → 52）：本函数只升**一层**，
+   *   而 `MOVE_UP_TRIES` 只给 8 次 ⇒ 10 格永远到不了。现在按 `maxLevels` 连续升：
+   *   每一层都重算方向（位置变了），一层跳不上去就停。 */
+  const start0 = b?.entity?.position
+  if (!start0) return { tried: false, why: 'no-bot' }
   const at = (x, y, z) => (() => { try { return b.blockAt(new Vec3(x, y, z)) } catch { return null } })()
-  const x0 = Number(start.x), y0 = Number(start.y), z0 = Number(start.z)
-  const fx = Math.floor(x0), fy = Math.floor(y0 + 0.1), fz = Math.floor(z0)
-  /* 方向：先朝目标那一侧（水平已重合 = 正上方），再依次试四向。 */
-  const tx = Number(target?.x), tz = Number(target?.z)
-  const cand = []
-  const dx = Number.isFinite(tx) ? Math.sign(Math.round(tx - x0)) : 0
-  const dz = Number.isFinite(tz) ? Math.sign(Math.round(tz - z0)) : 0
-  if (dx) cand.push([dx, 0])
-  if (dz) cand.push([0, dz])
-  for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    if (!cand.some((c) => c[0] === d[0] && c[1] === d[1])) cand.push(d)
-  }
-  let refused = null   /* 只保留**第一个有意义**的原因：后面那三个方向常常只是“没数据”，
-                          拿它覆盖“那面是水/基岩”会把真原因吞掉。 */
-  for (const [sx, sz] of cand) {
-    const ax = fx + sx, az = fz + sz
-    const floor = at(ax, fy, az), feet = at(ax, fy + 1, az), head = at(ax, fy + 2, az)
-    if (!floor || !feet || !head) { refused = refused ?? { why: 'no-world' }; continue }
-    if (!solidFloorAt(b, ax, fy, az)) { refused = refused ?? { why: 'no-floor', blockedBy: floor?.name ?? '?' }; continue }
-    const need = [feet, head].filter((x) => x.boundingBox === 'block')
-    const liquid = need.find((x) => /water|lava/.test(String(x.name)))
-    if (liquid) { refused = refused ?? { why: 'liquid', blockedBy: String(liquid.name) }; continue }
-    const prot = need.find((x) => !diggableBlock(x))
-    if (prot) { refused = refused ?? { why: 'protected', blockedBy: String(prot.name) }; continue }
-    if (need.length && !allowDig) { refused = refused ?? { why: 'no-dig' }; continue }
-    let dug = 0
-    let failed = false
-    for (const blk of need) {
-      if (await digOneSafe(b, blk, ctx, digMs)) dug += 1
-      else { failed = true; break }
+  const y0 = Number(start0.y)
+  let dugAll = 0
+  let tried = false
+  let refused = null
+  const rounds = Math.max(1, Number(maxLevels) || 1)
+  for (let lv = 0; lv < rounds; lv++) {
+    const pos = b?.entity?.position
+    if (!pos) break
+    const x0 = Number(pos.x), yNow = Number(pos.y), z0 = Number(pos.z)
+    const fx = Math.floor(x0), fy = Math.floor(yNow + 0.1), fz = Math.floor(z0)
+    /* 方向：先朝目标那一侧（水平已重合 = 正上方），再依次试四向。 */
+    const tx = Number(target?.x), tz = Number(target?.z)
+    const cand = []
+    const dx = Number.isFinite(tx) ? Math.sign(Math.round(tx - x0)) : 0
+    const dz = Number.isFinite(tz) ? Math.sign(Math.round(tz - z0)) : 0
+    if (dx) cand.push([dx, 0])
+    if (dz) cand.push([0, dz])
+    for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      if (!cand.some((c) => c[0] === d[0] && c[1] === d[1])) cand.push(d)
     }
-    if (failed) { refused = refused ?? { why: 'dig-failed' }; continue }
-    const gen0 = ctx?.moveGenOf ? ctx.moveGenOf() : null
-    const mine = () => (ctx?.moveGenOf ? ctx.moveGenOf() === gen0 : true)
-    try { b.setControlState('jump', true) } catch {}
-    await sleep(90)
-    try { b.setControlState('forward', true) } catch {}
-    const t0 = Date.now()
-    while (Date.now() - t0 < CLIMB_LIFT_MS) {
-      if (!mine()) break
-      if (Number(b?.entity?.position?.y ?? y0) >= fy + 0.75) break
-      await sleep(20)
+    let lifted = false
+    for (const [sx, sz] of cand) {
+      const ax = fx + sx, az = fz + sz
+      const floor = at(ax, fy, az), feet = at(ax, fy + 1, az), head = at(ax, fy + 2, az)
+      if (!floor || !feet || !head) { refused = refused ?? { why: 'no-world' }; continue }
+      if (!solidFloorAt(b, ax, fy, az)) { refused = refused ?? { why: 'no-floor', blockedBy: floor?.name ?? '?' }; continue }
+      const need = [feet, head].filter((x) => x.boundingBox === 'block')
+      const liquid = need.find((x) => /water|lava/.test(String(x.name)))
+      if (liquid) { refused = refused ?? { why: 'liquid', blockedBy: String(liquid.name) }; continue }
+      const prot = need.find((x) => !diggableBlock(x))
+      if (prot) { refused = refused ?? { why: 'protected', blockedBy: String(prot.name) }; continue }
+      if (need.length && !allowDig) { refused = refused ?? { why: 'no-dig' }; continue }
+      let dug = 0
+      let failed = false
+      for (const blk of need) {
+        if (await digOneSafe(b, blk, ctx, digMs)) dug += 1
+        else { failed = true; break }
+      }
+      dugAll += dug
+      tried = true
+      if (failed) { refused = refused ?? { why: 'dig-failed' }; continue }
+      const gen0 = ctx?.moveGenOf ? ctx.moveGenOf() : null
+      const mine = () => (ctx?.moveGenOf ? ctx.moveGenOf() === gen0 : true)
+      try { b.setControlState('jump', true) } catch {}
+      await sleep(90)
+      try { b.setControlState('forward', true) } catch {}
+      const t0 = Date.now()
+      while (Date.now() - t0 < CLIMB_LIFT_MS) {
+        if (!mine()) break
+        if (Number(b?.entity?.position?.y ?? yNow) >= fy + 0.75) break
+        await sleep(20)
+      }
+      try { b.setControlState('jump', false) } catch {}
+      await sleep(ms)
+      try { b.setControlState('forward', false) } catch {}
+      if (Number(b?.entity?.position?.y ?? yNow) >= fy + 0.75) { lifted = true; break }
+      refused = { why: 'no-lift', ...(need.length ? { blockedBy: String(need[0].name) } : { blockedBy: 'air' }) }
     }
-    try { b.setControlState('jump', false) } catch {}
-    await sleep(ms)
-    try { b.setControlState('forward', false) } catch {}
-    const end = b?.entity?.position ?? start
-    const up = Math.round((Number(end.y) - y0) * 100) / 100
-    if (up >= 0.75) return { tried: true, ok: true, dug, up }
-    return { tried: true, ok: false, why: 'no-lift', dug, up, blockedBy: need.length ? String(need[0].name) : 'air' }
+    if (!lifted) break
   }
-  return { tried: false, ...(refused ?? { why: 'no-dir' }) }
+  const endY = Number(b?.entity?.position?.y ?? y0)
+  const up = Math.round((endY - y0) * 100) / 100
+  if (!tried) return { tried: false, ...(refused ?? { why: 'no-dir' }) }
+  if (up >= 0.75) return { tried: true, ok: true, dug: dugAll, up }
+  return { tried: true, ok: false, ...(refused ?? { why: 'no-lift' }), dug: dugAll, up }
 }
 
 /* ---------------------------------------------------------------------------
@@ -3032,7 +3259,28 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
  * 两者都走同一套安全边界：石头不动、流体不动、受保护方块不动、没有合法落点就不动。
  * ------------------------------------------------------------------------- */
 /** B 的落差上限（格）—— 超过 3 格摔下去会掉血，不如慢点走 A。 */
-export const MOVE_DROP_MAX = 3
+export const MOVE_DROP_MAX = 4
+/** 血少的时候只敢掉 3 格（用户定的线：血 <10 就退回 3）。 */
+export const MOVE_DROP_MAX_LOW_HP = 3
+/** 往下跳的**硬上限**（不管血多满）：再高就不是“跳下去”，是“摔下去”了。 */
+export const MOVE_DROP_HARD_MAX = 12
+export const MOVE_DROP_MIN_HP = 10
+
+/** 这一次最多敢掉几格：血 <10 ⇒ 3，否则 4。血量读不到就当满血。 */
+export function dropMaxOf (b) {
+  const hp = Number(b?.health ?? 20)
+  /* 🔴 2026-10-30 用户：「它自己搭到半空中后，卡住下不来（柱顶 (20,70,91)，目标 y=63）」——
+   *    原来固定“≤4 格才敢跳”，7 格一律拒绝 ⇒ 站在自己垒的柱子上就下不来，只能干等。
+   *    MC 摔落伤害 = 落差 − 3（格），按“最多掉当前血量的 40%”反推允许落差：
+   *    满血 20 ⇒ 伤害 ≤ 8 ⇒ 落差 ≤ 11；半血 10 ⇒ 落差 ≤ 7；血 6 ⇒ 落差 ≤ 5。
+   *    `MOVE_DROP_MAX`（4）当下限，`MOVE_DROP_HARD_MAX` 当硬上限。 */
+  const safe = Number.isFinite(hp) ? hp : 20
+  const budget = Math.max(0, Math.floor(safe * 0.4))
+  const want = budget + 3
+  if (!Number.isFinite(want)) return MOVE_DROP_MAX
+  if (safe < MOVE_DROP_MIN_HP) return MOVE_DROP_MAX_LOW_HP
+  return Math.max(MOVE_DROP_MAX, Math.min(MOVE_DROP_HARD_MAX, want))
+}
 const DROP_SETTLE_MS = 1_400
 const STEP_DOWN_MS = 700
 const STEP_DOWN_SETTLE_MS = 1_000
@@ -3079,8 +3327,9 @@ export async function dropThrough (b, target, { allowDig = true, ctx = null, dig
     return { tried: true, ok: false, why: 'protected', blockedBy: blk.name }
   }
   /* 落点：往下找第一个“能站”的层（含头位净空）。找不到/太深 ⇒ 不挖。 */
+  const maxDrop = dropMaxOf(b)
   let ly = null
-  for (let y = fy - 2; y >= fy - MOVE_DROP_MAX - 2; y--) {
+  for (let y = fy - 2; y >= fy - maxDrop - 2; y--) {
     const f = solidFloorAt(b, fx, y, fz)
     if (!f) {
       /* 中途碰到水/岩浆（solidFloorAt 对流体返 null）要单独认出来——那不是落点，是坑 */
@@ -3095,9 +3344,19 @@ export async function dropThrough (b, target, { allowDig = true, ctx = null, dig
     break
   }
   if (ly == null) {
-    return {
-      tried: true, ok: false, why: 'no-landing', blockedBy: blk.name,
-      hint: `脚下是 ${blk.name}，可挖开后 ${MOVE_DROP_MAX} 格内**没有能站的落点**（再往下是空的/水/岩浆）—— 不挖，得换条路。`,
+    /* 🔴 2026-10-30 用户：「它自己搭到半空中后，卡住下不来」「但是脚下都是实心柱」——
+     *    柱子内部每一格的上方都是实心 ⇒ 那个“能站的层”一个都不存在，老逻辑直接 no-landing 放弃。
+     *    可是挖掉脚下这一格后人只掉 1 格，站在原来第 2 格上（那格本身就是新的地面）。
+     *    判据只看“第 2 格是不是实心可挖”，成立就允许这一挖（一次下 1 格，多叫几次就能下去）。 */
+    const b2 = (() => { try { return b.blockAt(new Vec3(fx, fy - 2, fz)) } catch { return null } })()
+    if (b2 && b2.boundingBox === 'block' && !/water|lava/.test(String(b2.name)) && diggableBlock(b2)) {
+      ly = fy - 1
+    } else {
+      return {
+        tried: true, ok: false, why: 'no-landing', blockedBy: blk.name,
+        maxDrop,
+        hint: `脚下是 ${blk.name}，可挖开后 ${maxDrop} 格内**没有能站的落点**（再往下是空的/水/岩浆）—— 不挖，得换条路。`,
+      }
     }
   }
   if (!await digOneSafe(b, blk, ctx, digMs)) {
@@ -3215,6 +3474,39 @@ export async function escapeMove (b, goal, step, ctx = {}, extra = {}) {
     const levels = (myY != null && wantY != null && wantY > myY) ? 2 : 1
     const dug = await clearHeadCell(b, { digMs: extra.digMs, levels })
     return { dug, clearHead: true, ...(dug ? { clearHeadLevels: levels } : {}) }
+  }
+  else if (step === 'descend') {
+    /* 2026-10-29（用户：「move 还不会自己上下」）：阶梯里的“往下走”，与 climbUp 对称。
+     *   目标比自己低 ≥1.5 格才试；先挖脚下直接落（快），再试挖斜下台阶（稳）。
+     *   `allowDig` 跟着 noDig / walkCanDig 走 —— 不挖那趟也能往下跳（dropThrough 会先找现成坑）。 */
+    if (extra.target == null) return { dug: 0 }
+    const myY = (() => { try { return Number(b.entity.position.y) } catch { return null } })()
+    const wantY = Number(extra.target?.y)
+    if (!Number.isFinite(myY) || !Number.isFinite(wantY) || myY - wantY < 1.5) return { dug: 0 }
+    const digOk = extra.noDig !== true && ctx?.cfg?.walkCanDig !== false && ctx?.cfg?.walkCarveStep !== false
+    try {
+      const dr = await dropThrough(b, extra.target, { allowDig: digOk, ctx })
+      if (dr?.ok) return { dug: Number(dr.dug) || 0, descended: Number(dr.down) || 0, tried: true, how: 'drop' }
+      const sd = await stepDown(b, extra.target, { allowDig: digOk, ctx })
+      if (sd?.ok) return { dug: Number(sd.dug) || 0, descended: Number(sd.down) || 0, tried: true, how: 'step' }
+      return { dug: 0, tried: Boolean(dr?.tried || sd?.tried), why: dr?.why ?? sd?.why ?? null }
+    } catch { return { dug: 0 } }
+  }
+  else if (step === 'climbUp') {
+    /* 2026-10-29（用户：目标在头顶 10 格，只报“前方 stone 挡着”）：
+     *   卡住时的第三级。目标在头顶 ≥1.5 格才试（否则交给 jump / breakAhead）。
+     *   一次连续挖上几层（`MOVE_CLIMB_LEVELS`），不一层一层重算。 */
+    const carveOff = extra.noDig === true
+      || ctx?.cfg?.walkCanDig === false
+      || ctx?.cfg?.walkCarveStep === false
+    if (carveOff || extra.target == null) return { dug: 0 }
+    const myY = (() => { try { return Number(b.entity.position.y) } catch { return null } })()
+    const wantY = Number(extra.target?.y)
+    if (!Number.isFinite(myY) || !Number.isFinite(wantY) || wantY - myY < 1.5) return { dug: 0 }
+    try {
+      const cu = await climbUp(b, extra.target, { allowDig: true, ctx, maxLevels: MOVE_CLIMB_LEVELS })
+      return { dug: Number(cu.dug) || 0, climbed: Number(cu.up) || 0, tried: cu.tried === true }
+    } catch { return { dug: 0 } }
   }
   else if (step === 'breakAhead') {
     /* 2026-10-22 用户「还是能卡住」：前三级（重算 / 跳 / 后退）都不改地形 ——
@@ -3399,7 +3691,7 @@ export function goalPointFor ({ target, ty, arriveUsed, portal = null } = {}) {
   }
 }
 
-export async function walkPathfinder (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, budgetAsked = null, noTower = true, towerFallback = true, intent = 'near', noDig = false, xz = false } = {}, ctx = {}) {
+export async function walkPathfinder (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, budgetAsked = null, noTower = true, noBridge = true, towerFallback = true, intent = 'near', noDig = false, xz = false } = {}, ctx = {}) {
   const b = self.bot
   endHoverFlight(b)   // 悬停着就别想蹦/走：先恢复重力（否则走路全废，见 endHoverFlight）
   /* 2026-10-18 审计 P1-2：意图决定"到"的标准（arrive / 允许高差） */
@@ -3495,7 +3787,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
    *    这种目标不许过 `standPointFor`：它是按"这一格站不住"往水平邻域找邻居的 ——
    *    长程目标的 y 本来就是猜的，让它挪一格等于**替 AI 改了目的地**（而且它只兜 ±1 格，
    *    救不了 y 猜错 10 格的情况）。整列原样交给 A*（`GoalXZ`），到了哪一层由 pathfinder 自己定。 */
-  const sp = xz
+  let sp = xz
     ? {
         x: Math.floor(Number(target.x)),
         y: Math.floor(Number(target.y)),
@@ -3504,7 +3796,30 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
         xz: true,
       }
     : standPointFor(b, target.x, target.y, target.z)
+  /* 🔴 2026-10-30（B，用户：「那 allowtower 不是控制纵向吗」「都做」）：
+   *    目标是**半空中的一格**（脚下没依附面）时，A* 眼里“通向它的最后一步”不存在 ⇒ 永远 NoPath。
+   *    纵向垫柱（allowTower ⇒ getMoveUp）本来就能一路往上垒，前提是**先站到它正下方的可站格**。
+   *    ⇒ 分两段走：这一轮先到正下方的底座，到位后换真目标重跑（那一轮 A* 会自己垫上去）。 */
+  let padGoalObj = null
+  let padBase = null
+  let padDone = false
+  if (!xz && sp?.noStand === true && ctx?._padDone !== true) {
+    const gx0 = Math.floor(Number(sp.x)); const gy0 = Math.floor(Number(sp.y)); const gz0 = Math.floor(Number(sp.z))
+    const baseY = standableY(b, gx0, gy0, gz0)
+    if (noTower) {
+      /* 没开 allowTower：垫不上去。保持老行为（交给 A*），但日志里说清是“半空、不是没路”。 */
+      self.log(`⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空、脚下没依附面 —— 没开 allowTower，垫不上去`)
+    } else if (Number.isFinite(baseY) && baseY < gy0 && canStandAtWorld(b, gx0, baseY, gz0)) {
+      padBase = { x: gx0, y: baseY, z: gz0 }
+      padGoalObj = { x: gx0, y: gy0, z: gz0 }
+      sp = { ...sp, x: gx0, y: baseY, z: gz0, adjusted: true, noStand: false, padUp: true }
+      self.log(`🧱 目标是半空 (${gx0},${gy0},${gz0}) —— 先到正下方底座 (${gx0},${baseY},${gz0})，到位后再垫 ${gy0 - baseY} 格`)
+    } else {
+      self.log(`⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空，那一列下面也没找到落脚点 —— 垫不过去`)
+    }
+  }
   const ty = sp.y
+  const tyNum = Number.isFinite(Number(ty)) ? Number(ty) : Number(sp.y ?? 0)   // 「靠近」判据要连着垂直一起比
   /* 🔴 2026-10-19 用户：「还有把末影传送门视为危险方块」—— 真正的原因是**目标半径**：
    *    `GoalNear(…, max(0, round(arrive-0.6)))` 默认半径 1，人在门外 1 格就满足 ⇒
    *    "到了但没进去"。目标（或它旁边）是传送门时把半径收到 **0**（必须站在那一格上），
@@ -3537,7 +3852,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
    *    `GoalXZ` 让"到那一列"本身就是目标，y 由 pathfinder 自己决定怎么下去/怎么上去。 */
   /* 命中传送门时不能再用 GoalXZ（它只锁水平两维）—— 得升级成三维精确格，人才能站进去。 */
   const GoalXZ = (xz && !gp.portal) ? goals?.GoalXZ : null
-  const goal = GoalXZ
+  let goal = GoalXZ
     ? new GoalXZ(gp.x, gp.z)
     : new goals.GoalNear(gp.x, gp.y, gp.z, xz ? 0 : gp.radius)
   // 地形分类（导航 P2，用户 m02868 的"地形分类 + 路径评分"）：
@@ -3569,6 +3884,12 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
    *    只是不再"原地把自己顶高"。（⚠️ 别改成清空 `scafoldingBlocks`：那会把 1×1 柱子的
    *    整条 move 也剪掉，掉坑里就真出不来了 —— 见 `src\plugins.mjs` 的注释。） */
   if (noTower) mv.allow1by1towers = false
+  /* 🔴 2026-10-29 用户：「加个 allowbridge」——
+   *    0.6.41 把 vendor 那三处垫方块入口都收进了 `allow1by1towers`，但“原地往上垒”和
+   *    “在坑上垫一格桥过去（getMoveForward）”其实是两件事：爬高危险、搭桥很安全。
+   *    现在拆开：`allow1by1towers` 只管往上（getMoveUp / getMoveJumpUp），
+   *    `this.allowBridge` 只管水平搭桥（getMoveForward）。默认两边都关。 */
+  mv.allowBridge = !noBridge
   if (terrain.kind !== 'flat' && terrain.kind !== 'unknown') {
     self.log(`🧭 脚边是${terrain.text}（${terrain.note}）—— 按这一类调寻路权重`)
   }
@@ -3700,6 +4021,10 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
   let pathThrash = 0
   /* 2026-10-18：窄隧道/台阶的"手工补救"（见 `carveStepAhead` 注释）。 */
   let carveTries = 0
+  /* 🌉 自动搭路的账：试了几次、一共铺了几格、最后一次为什么没铺成。 */
+  let bridgeTries = 0
+  let bridgePlaced = 0
+  let bridgeLast = null
   let carved = 0
   /* 🔴 2026-10-24 用户：「在 A* 的格子路线与真实物理控制之间加一个局部运动执行层」——
    *    一格台阶先试着**踩上去**（净空不够时按 noDig 决定清天花板），而不是把台阶块挖掉。
@@ -3713,6 +4038,12 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
   const descendTried = []
   let upTries = 0
   let upLast = null
+  /* “头顶挡着垫不了柱”试了几次。 */
+  let headTowerTries = 0
+  /* 🔴 2026-10-29: carveNoPathOk must be declared BEFORE first use.
+   * 0.6.61 used it in headTower (dig head then tower) while it was const 300 lines below,
+   * so every mc_move threw ReferenceError in 9ms. Kept here to avoid TDZ. */
+  const carveNoPathOk = !noDig && ctx.cfg?.walkCanDig !== false && ctx.cfg?.walkCarveStep !== false
   const ascendTried = []
   /* 2026-10-19：默认 `noTower` 让"往上一格"常常无路 —— 真走不通、目标又在上方时，
    * 允许**一次**垫柱兜底（只翻一次，别来回摇）。 */
@@ -3785,6 +4116,9 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
     ...(ascendTried.length ? { ascendTried: [...ascendTried] } : {}),
     ...(pathThrash ? { pathThrash } : {}),
     ...(pathResetsTotal >= 1 ? { pathResets: pathResetsTotal, pathResetReasons: { ...resetReasons } } : {}),
+    /* 最近一次作废是谁触发的。`goal_updated` / `movements_updated` 这类是“良性”的（不计数），
+     * 但它们同样会把 goto 打断 —— 实机里“走不动：路线中途作废”的来源就是它们。 */
+    ...(lastReset ? { lastReset } : {}),
     /* 挖/换工具在等回包时被守卫掐断过（见 `MOVE_CARVE_DIG_MS`）：这条路"挖过去"没挖动。 */
     ...(Number(b.__carveDigStalled) > 0 ? { digStalled: Number(b.__carveDigStalled) } : {}),
     /* 2026-10-24 用户实机（挖雪）：挡路的那块**挖不动**——必须单独报，
@@ -3793,6 +4127,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
     /* 执行顺序试到哪一步（2026-10-23）：`planStep` = 最后试的那一级，`planTried` = 这一趟试过的全部。
      *  AI 看到 `planTried` 里有 breakAhead 就该明白"挖也没用"，别再叫同一个点。 */
     ...(planTried.length ? { planStep: planTried[planTried.length - 1], planTried: [...planTried] } : {}),
+    ...(bridgePlaced > 0 ? { bridgePlaced } : {}),
     /* 用户 2026-10-23：走完一步要能看见"头顶是什么"（不然它以为能往上、结果跳不起来）。
      * 走不到、到了、中途放弃都走这条 moveInfo，所以三处结果口径一致。 */
     ...(() => { const a = aboveOf(b); return a ? { above: a } : {} })(),
@@ -3865,6 +4200,8 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
     let autoRepath = 0
     let autoRepathStall = 0
     let autoRepathDLeft = Infinity
+  let kicked = 0
+let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换来位移）   // “目标被重设”导致的原地续跑次数（不算失败）
     let attempt = planFrom
     for (;;) {
       /* 🔴 2026-10-24 通审：**脱困阶梯以前不吃预算** —— 每升一级要白等一个 vendor stuck 周期
@@ -3897,6 +4234,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
               const mv3 = ctx.movements(terrain, { digFirst })
               if (!mv3) throw new Error('pathfinder 的 Movements 造不出来（插件没挂上？）')
               mv3.allow1by1towers = true
+              mv3.allowBridge = !noBridge
               if (noDig) mv3.canDig = false
               b.pathfinder.setMovements(mv3)
               self.log('🧱 目标在上方、头顶有空 —— 这次允许垫一格往上（只翻这一次）')
@@ -3940,6 +4278,18 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
         markPlan(attempt + 1, step)
         self.log(`🔁 走不动了 → 第 ${attempt} 步：${escapeTextOf(step)}（执行顺序 ${plan.indexOf(step) + 1}/${plan.length}，累计重算 ${repathCount} 次）`)
         const em = await escapeMove(b, goal, step, ctx, { target, noDig, goals })
+        /* 2026-10-29：往上挖了一层（纯垂直，水平 0 格）也是进展 ⇒ 清零阶梯、重算再走。 */
+        if (step === 'climbUp' && Number(em?.climbed) > 0) {
+          carved += Number(em.dug) || 0
+          attempt = 0
+          self.log(`🧗 往上挖了 ${Number(em.climbed).toFixed(1)} 格（挖开 ${Number(em.dug) || 0} 块）—— 重算再走`)
+        }
+        /* 2026-10-29：往下走成功（挖开脚下 / 挖斜下台阶）也是进展 ⇒ 清零阶梯、重算再走。 */
+        if (step === 'descend' && Number(em?.descended) > 0) {
+          carved += Number(em.dug) || 0
+          attempt = 0
+          self.log(`⬇️ 往下走了 ${Number(em.descended).toFixed(1)} 格（挖开 ${Number(em.dug) || 0} 块）—— 重算再走`)
+        }
         if (step === 'breakAhead' && Number(em?.dug) > 0) {
           carved += Number(em.dug)
           carveResets++
@@ -3964,8 +4314,30 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
           const mv2 = ctx.movements(terrain, { digFirst })
           if (mv2) {
             if (noTower) mv2.allow1by1towers = false
+            mv2.allowBridge = !noBridge
             if (noDig) mv2.canDig = false
             b.pathfinder.setMovements(mv2)
+          }
+        }
+      }
+      /* 🔴 2026-10-31 用户：「move 应该能直接移动到任意地方（填了 allowTower + noDig）」。
+       *   背包有整方块时 A* 会规划“垫柱子往上” ⇒ 它认为有路，于是既不走 NoPath
+       *   分支、也进不了脱困阶梯；可洞里头顶那两格是实心，`placeBlock` 永远放不上
+       *   ⇒ 原地重算到超时。这里先把“要垫但头顶堵着”认下来：**先挖开头顶再让它垫**。 */
+      if (!noTower && carveNoPathOk && headTowerTries < MOVE_HEAD_TOWER_TRIES && downBudgetOk(self)) {
+        const headBlocked = towerHeadBlocked(b)
+        if (headBlocked) {
+          headTowerTries++
+          try { ctx.stopPathing?.(b) } catch {}
+          await sleep(60)
+          const dugHead = await clearHeadForTower(b, { ctx })
+          if (dugHead > 0) {
+            carved += dugHead
+            if (!planTried.includes('headTower')) planTried.push('headTower')
+            self.log(`🧗 头顶是 ${headBlocked}、垫不了柱 —— 先挖开 ${dugHead} 格，再垫上去`)
+            emptyNoPath = false
+            attempt++
+            continue
           }
         }
       }
@@ -4011,6 +4383,19 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
           watch.promise,
         ])
         if (watch) { watch.stop(); watch = null }
+        /* 🔴 2026-10-30（B）：半空目标的**第一段**（走到正下方底座）跑完了 ⇒ 换成真目标再跑一轮，
+         *    这一轮 A* 会从底座用 getMoveUp 一路垫上去，最后站在目标那一格上。 */
+        if (padGoalObj && !padDone && padBase) {
+          const curP = b.entity.position
+          const nearBase = Math.hypot(curP.x - padBase.x, curP.z - padBase.z) <= 1.2
+            && Math.abs(curP.y - (padBase.y + 0.5)) <= 1.2
+          if (nearBase) {
+            padDone = true
+            goal = new goals.GoalNear(padGoalObj.x, padGoalObj.y, padGoalObj.z, 0)
+            self.log('🧱 到目标正下方了 —— 开始往上垫')
+            continue
+          }
+        }
         /* 🔴 2026-10-24 用户：**A* 直接 NoPath（空路径假成功）时也要有机会做局部几何处理** ——
          *    这种时候 goto 立刻就 resolve 了，根本等不到 2.4 秒的卡住监控器，
          *    于是一格台阶就把整次移动判成"没路可走"。
@@ -4039,9 +4424,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
             }
           }
         }
-        /* NoPath 时"允许自己动手挖"吗 —— 语义同下面 3381 那个 `carveAllowed`，
-         * 但它在下面才声明，这里引用会撞 TDZ（本文件 3303 行踩过一模一样的坑）。 */
-        const carveNoPathOk = !noDig && ctx.cfg?.walkCanDig !== false && ctx.cfg?.walkCarveStep !== false
+        /* 声明已上移到起步区（避 TDZ）。 */
         if (emptyNoPath && stepUpTries < STEP_UP_TRIES) {
           const carveAllowedNow = carveNoPathOk
           const su = await stepUp(b, target, { allowDig: carveAllowedNow, ctx, cells: MOVE_CARVE_CELLS })
@@ -4103,7 +4486,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
             upTries++
             try { ctx.stopPathing?.(b) } catch {}
             await sleep(60)
-            const cu = await climbUp(b, target, { allowDig: carveNoPathOk, ctx })
+            const cu = await climbUp(b, target, { allowDig: carveNoPathOk, ctx, maxLevels: MOVE_CLIMB_LEVELS })
             if (cu.ok) {
               if (!ascendTried.includes('climbUp')) ascendTried.push('climbUp')
               self.log(`🧗 目标在头顶 ${dyUp.toFixed(1)} 格 —— 挖开斜上方跳上一层（升了 ${cu.up} 格），重新算路`)
@@ -4144,6 +4527,37 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
             }
           }
         }
+        /* 🌉 自动搭路：挖也过不去、A* 又没路时，开了 allowBridge 就自己铺几格。 */
+        if (emptyNoPath && !noBridge && bridgeTries < MOVE_BRIDGE_TRIES && downBudgetOk(self)) {
+          const p0 = b?.entity?.position
+          const txB = Math.floor(Number(target?.x))
+          const tzB = Math.floor(Number(target?.z))
+          const straight = Boolean(p0) && Number.isFinite(txB) && Number.isFinite(tzB)
+            && (Math.floor(p0.x) === txB || Math.floor(p0.z) === tzB)
+          if (straight) {
+            bridgeTries++
+            try { ctx.stopPathing?.(b) } catch {}
+            await sleep(60)
+            const br = await bridgeToward(self, b, target, { maxSteps: MOVE_BRIDGE_STEPS })
+            bridgeLast = { ok: br.ok === true, placed: br.placed ?? 0, why: br.why ?? null }
+            if (br.ok) {
+              bridgePlaced += Number(br.placed ?? 0)
+              if (!planTried.includes('bridge')) planTried.push('bridge')
+              self.log(`🌉 没路可走 —— 朝${br.dirName ?? '目标方向'} 铺了 ${br.placed} 格方块造路，重新算路`)
+              emptyNoPath = false
+              attempt++
+              continue
+            }
+            if (br.why === 'not-straight') {
+              self.log('🌉 想搭路，但方向是斜的（搭路只走直线）—— 先在同一个 x 或 z 上走一段再搭')
+              bridgeTries = MOVE_BRIDGE_TRIES
+            } else if (br.why === 'too-close') {
+              bridgeTries = MOVE_BRIDGE_TRIES
+            } else {
+              self.log(`🌉 想搭路，没铺成（${br.why ?? '未知'}${br.note ? '：' + br.note : ''}）`)
+            }
+          }
+        }
         break                                      // 正常结束（到了 / 普通失败）⇒ 下面照旧复核距离
       } catch (e) {
         if (watch) { watch.stop(); watch = null }
@@ -4152,12 +4566,42 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
          *   `fullStop()` 站住；以前这里直接 `throw e` ⇒ 整次 mc_move 报"寻路被打断"收工，
          *   明明路还在、目标也没变。这类中断（PathStopped / GoalChanged）现在原地重发
          *   同一个 goal 接着走；连续 `MOVE_AUTOREPATH_STALL` 次都没靠近才交回脱困阶梯。 */
+        /* 🔴 2026-10-31 用户实机（`mc_move {allowTower:true,noDig:false,x:9,y:71,z:82}` 上不去）：
+         *   三次调用都只跑 99~127ms、`moved:0`，日志全是 `goal_updated`。vendor 的 `setGoal()`
+         *   第一件事就是 `resetPath('goal_updated')`，而我们自己的“真停寻路”就是 `setGoal(null)`
+         *   —— 并发动作/上一趟收尾各来一下，正在跑的路线就被清空，人还一格没挪。
+         *   这类“目标被重设”不是路不通：**只要还是我这一趟（`_moveGen` 没变）就立刻接着跑**，
+         *   不占 `MOVE_AUTOREPATH_MAX` 的额度、也不累计 stall（否则 3 次就判“没靠近”，人还没动就被收工）。
+         *   有 `MOVE_KICK_MAX` 兜底，真空转也不会无限。 */
+        if (e?.name === 'PathStopped'
+          && (lastReset === 'goal_updated' || lastReset === 'movements_updated')
+          && self._moveGen === gen
+          && kicked < MOVE_KICK_MAX
+          && Date.now() - t0 < budget - MOVE_ESCALATE_MIN_MS) {
+          /* 🔴 2026-10-31 实机（“还是不会自己上去”，repathCount:45）：上面那条“立刻接着跑”
+           *   会被我们**自己**的脱困阶梯触发（阶梯每一级都先 stopPathing ⇒ setGoal(null) ⇒ goal_updated），
+           *   于是续跑 → 又被自己打断 → 再续跑：40 次空转、位置一格没变。
+           *   判据补一条：**续跑必须换来位移**，两次 kick 之间没靠近 0.3 格就认定是自激。 */
+          const pK = b.entity.position
+          /* 🔴 2026-10-30 实机（“第一次为什么垫一个方块就不够了”）：原来只算水平距离，
+           *    目标在头顶时垫柱升 2 格、水平纹丝不动 ⇒ 被判成“没动”⇒ 空转/收工。垂直也算。 */
+          const dK = Math.hypot(pK.x - sp.x, pK.z - sp.z, pK.y - tyNum)
+          if (kickDLeft == null || dK <= kickDLeft - 0.3) {
+            kickDLeft = dK
+            kicked++
+            await sleep(30)
+            continue
+          }
+          self.log("⚠ 续跑也没动位置（剩 " + dK.toFixed(1) + " 格）—— 认定是自己激惹的，不再空转")
+        }
         if ((e?.name === 'PathStopped' || e?.name === 'GoalChanged')
           && self._moveGen === gen
           && autoRepath < MOVE_AUTOREPATH_MAX
           && Date.now() - t0 < budget - MOVE_ESCALATE_MIN_MS) {
           const pNow = b.entity.position
-          const dLeftNow = Math.hypot(pNow.x - sp.x, pNow.z - sp.z)
+          /* 🔴 同一条：目标在头顶时，垫一格升 1 格是真进展，水平距离却不变 ⇒
+           *    3 次“没靠近”就交回脱困阶梯（一趟只垫 1~2 格的真因）。垂直也算进展。 */
+          const dLeftNow = Math.hypot(pNow.x - sp.x, pNow.z - sp.z, pNow.y - tyNum)
           if (dLeftNow <= autoRepathDLeft - 0.5) {
             autoRepathStall = 0
             autoRepathDLeft = dLeftNow
@@ -4282,6 +4726,12 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
                * 10 秒预算里两下就没了。直接封顶，落到下面的 `attempt++` 换下一招。 */
               if (n <= 0) {
                 carveTries = MOVE_CARVE_TRIES
+                /* 🔴 2026-10-31：空手挖石头 7.5 秒，一样会让“挖不开”。单独标一级，
+                 *    让提示说“这轮时间被挖它吃掉了、直接再叫一次”。 */
+                if (b.__carveTooSlow) {
+                  if (!planTried.includes('tooSlow')) planTried.push('tooSlow')
+                  self.log(`⛏ 挖 ${b.__carveTooSlow.name} 要 ${(Number(b.__carveTooSlow.needMs) / 1000).toFixed(1)} 秒 —— 这一轮的时间被它吃掉了`)
+                }
                 if (b.__carveTooHard) {
                   if (!planTried.includes('tooHard')) planTried.push('tooHard')
                   self.log(`⛏ 眼前 ${b.__carveTooHard.name} **挖不动**（要 ${b.__carveTooHard.need || '对的工具'}，手上一时半会儿挖不开）—— 不硬挖`)
@@ -4543,7 +4993,15 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
      *      **不是走不通**：直接再叫一次 mc_move 往同一个目标走，会接着走。"}`
      *    —— 4 秒一格没挪，却告诉模型"不是走不通"，于是它一次次重发同一个走不到的点。
      *    判据补一条：**既没挪动、也没靠近** 就不算"时间到了"，得如实说卡住了。 */
-    const noProgress = moved < 0.6 && remaining >= startRemaining - 0.3
+    /* 2026-10-29（用户：目标在头顶 10 格，工具却说“走不动”）：`moved` 只算水平位移 ——
+     *   往上挖一层、往下掉一层都是纯垂直移动（水平 0 格）⇒ 人明明在职业地上升也被判“没进展”。
+     *   净垂直位移 ≥ 0.75 格也算进展（上升/下降都算）。 */
+    /* ⚠️ 起点 y 读不到时它是 `undefined` ⇒ 以前写 `?? 0` 会算出“升了 64 格”的假进展（假 bot / 未赋值场景）。
+     *   两端都要是有限数，且差值在一次移动能变出来的量级内（≤ 32 格）才算。 */
+    const yA = Number(end?.y), yB = Number(start?.y)   /* ⚠️ `sp` 是**目标点**（standPointFor），不是起点 —— 用错会把“离目标差 6 格”当成“已经升了 6 格” */
+    const dyV = (Number.isFinite(yA) && Number.isFinite(yB)) ? Math.abs(yA - yB) : 0
+    const vRose = (dyV >= 0.75 && dyV <= 32) ? dyV : 0
+    const noProgress = vRose < 0.75 && moved < 0.6 && remaining >= startRemaining - 0.3
     /* P1（用户报告“失败结果要可操作”）：卡住时别只说"没路/没进展"，把眼前那格也报出来，
      * 让 AI 自己决定挖、绕、搭桥还是换目标 —— 走路层不替它做这个决定。 */
     let blockedAhead = null

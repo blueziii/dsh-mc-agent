@@ -168,6 +168,11 @@ export async function connect (self, opts = {}, ctx = {}) {
       ...(auth.mode === 'yggdrasil' ? { sessionServer: `${auth.authUrl}/sessionserver` } : {}),
       accessToken: session.accessToken,
       version,                              // false = 自动探测
+      /* 重生由 AI 自己决定（2026-10-29，用户：「改成由 ai 选择重生，现在 ai 反应不过来」）。
+       * mineflayer 的 `lib/loader.js:75` 默认 `options.respawn = options.respawn ?? true`，即“血一没就自动重生”。
+       * 自动重生太快：人还没醒就被送回出生点，之前的目标全作废，只能报“走不动/太远”。
+       * 现在死了就停在死亡界面（只能说话/看东西），由模型叫 `mc_act { mode: "respawn" }` 决定什么时候重生。 */
+      respawn: false,
       auth: (client, options) => {
         client.session = session
         client.uuid = uuid
@@ -243,7 +248,15 @@ export async function connect (self, opts = {}, ctx = {}) {
       self.emit('offline', { sub, reason: why, willReconnect, at: Date.now() })
       if (willReconnect) scheduleReconnect(self, sub, ctx)
     })
-    b.on('death', () => { self.stats.deaths++; self.emit('death', { position: self.position }) })
+    b.on('death', () => {
+      self.stats.deaths++
+      /* 死在哪、死了几次要能回溯（掉落物 5 分钟后消失）。 */
+      self._life = { at: Date.now(), position: self.position, deaths: self.stats.deaths }
+      self.emit('death', { position: self.position })
+    })
+    b.on('respawn', () => {
+      self._life = { ...(self._life ?? {}), respawnAt: Date.now(), respawnPosition: self.position }
+    })
     b.on('health', () => {
       if (b.health !== undefined && b.health <= 6) self.emit('damage', { health: b.health, position: self.position })
     })

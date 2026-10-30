@@ -118,7 +118,7 @@ export function emitPlayerChat (self, who, text, selfName) {
   let who2 = w
   if (anonymous) {
     try {
-      const b = self.requireBot()
+      const b = self.requireBot({ allowDead: true })
       const others = Object.keys(b?.players ?? {}).filter((n) => n !== selfName)
       who2 = others.length === 1 ? others[0] : '?'
     } catch { who2 = '?' }
@@ -190,7 +190,7 @@ export function pushChat (self, kind, who, text) {
 }
 
 export function chatSay (self, text) {
-  const b = self.requireBot()
+  const b = self.requireBot({ allowDead: true })
   const t = String(text).replace(/[\r\n]+/g, ' ').slice(0, 220)
   /* 🔴 2026-10-08 审计：mineflayer 的 `bot.chat('/…')` 会当成**指令**发出去（走 `chat_command` 包），
    *    于是 `mc_say` 能绕过 `mc_command` 的指令白名单 —— 白名单就白设了。

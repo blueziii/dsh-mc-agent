@@ -107,34 +107,59 @@ export function veinHint (b, minedName) {
  *
  * 返回 `{ bad, why, below }`，`bad=false` 表示照挖。**不检查远处的方块** —— 那是寻路和搭路的事。
  */
-function underfootRiskOf (b, pos) {
+/* 跟“往下走”同一把尺（`src/movement.mjs` 的 `MOVE_DROP_MAX`）—— 能安全掉 4 格，
+ * 就没理由不许挖脚下那块矿。 */
+/* 🔴 2026-10-29：旧的 `UNDERFOOT_DROP_MAX`（4 格）与血少时 3 格那套阈值**不再用来拦** ——
+ *   它们把“矿下面就是矿洞”这种最常见的情形整格拦掉（用户：「只会挖脚下方块下面的那格，
+ *   不挖脚下的那格」）。现在改按摔落伤害算：伤害 = 落差 − UNDERFOOT_SAFE_DROP（MC 公式）。
+ *   常量保留导出（`UNDERFOOT_DROP_MAX` 现在只用于文案分级，套件也还 import 它）。 */
+export const UNDERFOOT_DROP_MAX = 4
+export const UNDERFOOT_DROP_MAX_LOW_HP = 3
+export const UNDERFOOT_DROP_MIN_HP = 10
+export const UNDERFOOT_SAFE_DROP = 3
+
+export function underfootRiskOf (b, pos) {
   const p = b.entity?.position
   if (!p) return null
   const feet = p.floored()
   const sameColumn = pos.x === feet.x && pos.z === feet.z
-  /* 只有"脚底下**垫着**的那一格"才算拆支撑 —— 站的那一格本身（`feet.y`）永远是空气，
+  /* 只有“脚底下**垫着**的那一格”才算拆支撑 —— 站的那一格本身（`feet.y`）永远是空气，
    * 挖同层的方块不会让人掉下去（水平相邻的方块另算，那是寻路的事）。 */
   const mineSupport = pos.y === feet.y - 1
   if (!sameColumn || !mineSupport) return null
+  /* 🔴 2026-10-29 用户：「mc_dig · coal_ore 不挖脚底下的」。旧判据是“下面不是实心就拦”，
+   *   于是“矿就是脚下支撑、矿下面是矿洞”这种最常见的情形一律被拦。
+   *   现在跟 `dropThrough` 对齐：**能安全掉下去（≤ dropMax 格、落点实心、没液体）就照挖**。 */
+  const hp = Number(b.health ?? 20)
   const below = []
-  for (let dy = 1; dy <= 3; dy++) {
+  /* 往下读 24 格：够判断“掉下去会不会死”（MC 摔落伤害 = 落差 − 3，血量满 20）。 */
+  for (let dy = 1; dy <= 24; dy++) {
     const c = b.blockAt(new Vec3(pos.x, pos.y - dy, pos.z))
     below.push(c ? c.name : null)
   }
-  const first = below[0]
-  const second = below[1]
   const liquid = (n) => n != null && isLiquid(n)
-  /* 🔴 `null` = 那一格没加载（"不知道"），**不当成"空"** —— 否则在测试/新区块里
-   *    每次挖脚下方块都会被拦，而在真世界里脚下总是加载好的。
-   *    只有**读到了**"不是实心"或"是液体"才判危险。 */
-  const bad = (first != null && !isSolidBlock(first)) || liquid(first) || liquid(second)
-  return {
-    bad,
-    why: bad
-      ? `正下方只有 ${below.map((n) => n ?? '未加载').join(' / ')} —— 挖掉这一格就掉下去了`
-      : null,
-    below,
+  const fmt = () => below.map((n) => n ?? '未加载').join(' / ')
+  if (liquid(below[0])) return { bad: true, why: `正下方就是 ${below[0]}`, below }
+  /* 数“掉几格才落地”。`null` = 没加载（不知道），按老规矩**不当成空**。 */
+  let air = 0
+  while (air < below.length && below[air] != null && !isSolidBlock(below[air])) {
+    if (liquid(below[air])) return { bad: true, why: `正下方 ${below[air]} 是液体（${fmt()}）`, below }
+    air++
   }
+  const land = below[air]
+  if (air === 0) return { bad: false, why: null, below }
+  if (land == null) {
+    /* 已经读到“确实是空气”，但往下读不到了 ⇒ 不知道还有多深。
+     * 这时候要**保守**（拦）—— “不知道”往深坑那边靠。 */
+    return { bad: true, why: `正下方 ${air} 格都是空的，再往下就读不到了（不知道多深）`, below }
+  }
+  if (liquid(land)) return { bad: true, why: `掉 ${air} 格就掉进 ${land}（${fmt()}）`, below }
+  /* 摔落伤害 = 落差 − 3（免伤 3 格）；摔不死就照挖。 */
+  const dmg = Math.max(0, air - UNDERFOOT_SAFE_DROP)
+  if (dmg >= hp) {
+    return { bad: true, why: `落差 ${air} 格、掉下去摔 ${dmg} 点（当前血 ${hp}）—— 会摔死`, below, dropTo: air, fallDamage: dmg }
+  }
+  return { bad: false, why: null, below, dropTo: air, fallDamage: dmg }
 }
 
 export async function breakBlock (self, { x, y, z, allowDangerous = false, noClear = false } = {}, ctx = {}) {
@@ -887,14 +912,18 @@ export async function dig (self, {
         const stand = cell
           ? { x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }
           : { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }
-        const w = await self.walkTo(stand, { arrive: 2.2, budget, noDig, towerFallback })
+        /* 🔴 2026-10-31 用户实机：「够不着 diamond_ore（眼睛到方块中心 5.2 格，走过去也没走到）」。
+         *   挖东西只要站到 **reach 以内** 就行，不需要贴到 2.2 格 —— 固定 2.2 会让“能走到 3~4 格内”
+         *   也判成“没走到”。改成跟着 reach 走（留 1 格余量）。 */
+        const arrive = Math.max(1.2, reachMax - 1)
+        const w = await self.walkTo(stand, { arrive, budget, noDig, towerFallback })
         /* 🔴 2026-10-25 用户：「dig 如果没办法到那格应该自动切换成可破坏」——
          *   默认不挖（只绕路）走不过去时，**自动**改成允许挖穿挡路的方块再走一次。
          *   只在真的还够不着时重试，并且只用本轮剩下的时间（不把整轮吃光）。 */
         if (noDig && fresh && fresh.name === nm && blockReachOf(b, fresh) > reachMax) {
           const rest = self.callLeft()
           if (rest > 1200) {
-            const w2 = await self.walkTo(stand, { arrive: 2.2, budget: Math.min(budget, rest), noDig: false, towerFallback })
+            const w2 = await self.walkTo(stand, { arrive, budget: Math.min(budget, rest), noDig: false, towerFallback })
             fresh = b.blockAt(p)
             if (w2?.arrived === true || (fresh && fresh.name === nm && blockReachOf(b, fresh) <= reachMax)) {
               out.push(`绕不过去（${w?.reason ?? '路被方块挡着'}）—— 已改成**挖穿挡路的方块**走过去`)
@@ -926,8 +955,19 @@ export async function dig (self, {
         }
         if (blockReachOf(b, fresh) > reachMax) {
           const away = blockReachOf(b, fresh)
+          /* 🔴 2026-10-31：只说“够不着”没法判断是“它在脚下没选中”还是“真的远”。
+           *   补上我站在哪、它相对我哪个方向几格。 */
+          const mep = b.entity?.position
+          const myY = mep ? Math.floor(mep.y) : null
+          const dy = myY == null ? 0 : Math.floor(p.y) - myY
+          const horiz = mep ? Math.hypot(p.x - mep.x, p.z - mep.z) : NaN
+          const rel = mep
+            ? `我站在 ${Math.floor(mep.x)} ${myY} ${Math.floor(mep.z)}，`
+              + `它在${dy >= 1 ? `我上方 ${dy} 格` : dy <= -1 ? `我下方 ${-dy} 格` : '同一层'}`
+              + `${Number.isFinite(horiz) && horiz >= 1 ? `、水平 ${horiz.toFixed(1)} 格外` : '、就在脚下'}`
+            : '位置读不到'
           out.push(`够不着 ${nm} @ ${p}（眼睛到方块中心 ${away.toFixed(1)} 格，`
-            + `${w?.arrived ? '走过去也只到这么远' : '走过去也没走到'}）—— `
+            + `${w?.arrived ? '走过去也只到这么远' : `走过去也没走到：${w?.reason ?? '没走到'}`}；${rel}）—— `
             + '先 `mc_move` 到它旁边（或换个近一点的目标）再叫我挖：站远了挖服务端不认，方块会"复原"。'
             + (noDig ? '（已经试过挖穿挡路的方块，还是到不了）' : ''))
           continue
@@ -1205,13 +1245,17 @@ export async function canSeeBlockOf (b, p, { reachMax = 4.5 } = {}) {
   const from = new V(eye.x, eye.y + 1.62, eye.z)
   const dist = from.distanceTo(new V(gx + 0.5, gy + 0.5, gz + 0.5))
   if (!(dist > 0) || dist > reachMax + 1) return null
-  /* ② 前后左右（北南西东）只要有一面是空的，就能挖 */
-  const sides = [[0, -1], [0, 1], [-1, 0], [1, 0]]
+  /* ② 上下前后左右（**六面**）只要有一面是空的，就能挖。
+   *   🔴 2026-10-29 用户：「现在还是不能往下挖」。以前只看**水平四面** ——
+   *   矿在脚下 2 格、脚下 1 格是石头、四周也是石头时，它被判成“埋死”，
+   *   而“朝我这一面”又只挑水平邻格 ⇒ 挖了旁边四块还是判埋死，死循环。
+   *   把“脚下那层石头”当成一面空（它本来就是“能挖开的一面”），下面的 LOS 会把它报成挡路块。 */
+  const sides = [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0]]
   const around = []
-  for (const [dx, dz] of sides) {
-    const nb = at(gx + dx, gy, gz + dz)
+  for (const [dx, dy, dz] of sides) {
+    const nb = at(gx + dx, gy + dy, gz + dz)
     if (!nb) return null                       // 有一面读不到 ⇒ 判不了，不拦
-    around.push({ dx, dz, nb })
+    around.push({ dx, dy, dz, nb })
   }
   if (around.some((s) => isAir(s.nb.name) || isPassable(s.nb.name))) {
     /* ②′ 四面有空 **不等于** 看得见 —— 再量一遍"眼睛 → 这一格"的视线（issue #3）。 */
@@ -1219,12 +1263,12 @@ export async function canSeeBlockOf (b, p, { reachMax = 4.5 } = {}) {
     if (los) return { ok: false, blocker: los.blocker, at: los.at, los: true }
     return { ok: true, los: true }
   }
-  /* ③ 四面全实心：拦下，报第一面（北）那块的坐标 */
+  /* ③ 六面全实心：拦下，报最靠外那面（北）的坐标 */
   const s0 = around[0]
   return {
     ok: false,
     blocker: s0.nb.name ?? '方块',
-    at: { x: gx + s0.dx, y: gy, z: gz + s0.dz },
+    at: { x: gx + s0.dx, y: gy + s0.dy, z: gz + s0.dz },
   }
 }
 
@@ -1257,19 +1301,29 @@ function faceTowardEye (b, p, at, reachMax) {
   const eye = b?.entity?.position
   if (!eye || !p) return null
   const gx = Math.floor(p.x); const gy = Math.floor(p.y); const gz = Math.floor(p.z)
-  const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]]
+  /* 🔴 2026-10-29：以前只挑**水平四面**。矿在脚下时，“朝我这一面”是**上面那格**，
+   *   挑水平面永远挖不到它 ⇒ 现在六面都看，取离眼睛最近的那一面。 */
+  const dirs = [[0, -1, 0], [0, 1, 0], [-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1]]
+  /* 🔴 2026-10-31 用户：「是不是可以挖离自己 1 格的方块，然后挖完以后就缺一格，就可以
+   *   挖钻石了」—— 对，这才是正常打法：**从侧面开个缺口**，人站着不掉，从缺口里把矿挖出来。
+   *   以前只按“离眼睛最近”挑，矿在脚下时“最近那面”就是**自己踩着的支撑方块** ⇒ 挖它等于
+   *   拆自己的立足点（还会先被 `underfootRiskOf` 拦下），矿永远挖不到。
+   *   排序改成：水平侧面（0，不掉人）> 上方（1）> 下方（2）> 自己脚下的支撑（3，最后才考虑）。 */
+  const fp = (() => { try { return b.entity.position.floored() } catch { return null } })()
   let best = null
-  for (const [dx, dz] of dirs) {
-    const x = gx + dx; const z = gz + dz
-    const blk = at(x, gy, z)
+  for (const [dx, dy, dz] of dirs) {
+    const x = gx + dx; const y = gy + dy; const z = gz + dz
+    const blk = at(x, y, z)
     if (!blk) continue
     if (blk.boundingBox !== 'block') continue
     if (isLiquid(blk.name)) continue
     if (UNBREAKABLE_BLOCK.test(blk.name) || blk.hardness === -1 || blk.hardness === Infinity) continue
     if (NO_CLEAR_BLOCK.test(blk.name)) continue
     if (blockReachOf(b, blk) > reachMax) continue
-    const d = Math.hypot(eye.x - (x + 0.5), eye.y - (gy + 0.5), eye.z - (z + 0.5))
-    if (!best || d < best.d) best = { x, y: gy, z, d }
+    const isSupport = Boolean(fp) && x === fp.x && y === fp.y - 1 && z === fp.z
+    const rank = isSupport ? 3 : (dy === 0 ? 0 : (dy > 0 ? 1 : 2))
+    const d = Math.hypot(eye.x - (x + 0.5), eye.y - (y + 0.5), eye.z - (z + 0.5))
+    if (!best || rank < best.rank || (rank === best.rank && d < best.d)) best = { x, y, z, d, rank }
   }
   return best
 }

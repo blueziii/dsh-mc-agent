@@ -775,6 +775,9 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
     }
   } catch {}
   mv.canDig = self.cfg.walkCanDig !== false        // 挡路的方块可以挖穿（不然掉坑里出不来）
+  /* 2026-10-31：垫一格按“多绕 N 步”计价（默认 12）。上游默认 1 太便宜 ⇒
+   * `allowTower:true` 时“能跳上去 / 能绕”的地方也一路垫方块。现在只有真没路才垫。 */
+  mv.placeCost = Number(self.cfg.walkTowerCost ?? 4)
   mv.allowSprinting = true
   mv.dontMineUnderFallingBlock = true
   /* 危险方块进寻路黑名单（mc_map 第二轮）：`blocksToAvoid` 决定"这格能不能站"
@@ -787,7 +790,20 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
    *    而挖树叶的 laborCost（约 4.6–7.6）比绕树（2–3 步）便宜 ⇒ A* 一路挖着树冠往上爬。
    *    塞进 `blocksCantBreak` 之后 `safeToBreak()` 返回 false ⇒ 那条 move 记 100（不可行）。
    *    ⚠️ 只影响**寻路**；`mc_dig` 砍树不走 A*，照旧能砍。 */
-  for (const id of treeBlockIds(b)) mv.blocksCantBreak.add(id)
+  for (const id of treeBlockIds(b, { leaves: false })) mv.blocksCantBreak.add(id)
+  /* 🔴 2026-10-29 用户实机：「出生在树上 → 困在竖井里（头顶 7 格净空）」。
+   *   上次把**树叶也塞进 blocksCantBreak**，代价是“站在树冠上四面全是树叶”时彻底无路可走：
+   *   A* 不许挖、我们自己的兜底补挖也照抄了同一条线 ⇒ 只能报错让模型自己猜该挖哪块。
+   *   树叶挖起来 0.2 秒、不掉落、不塌，比绕路 20 格便宜得多 —— 该挖。
+   *   现在改成**加价**（默认 ×6）：`laborCost` 乘上去之后绕树（2~3 步）仍然远便宜于挖树叶
+   *   （基础 4.6~7.6 ⇒ 约 28~46 步）⇒ 平时不往树上爬；真被树叶围住时它是唯一出路，A* 就会挖。 */
+  try {
+    const pen = {}
+    for (const blk of b?.registry?.blocksArray ?? []) {
+      if (blk && isLeafBlock(blk.name) && typeof blk.id === 'number') pen[blk.id] = self.cfg.walkLeafDigPenalty ?? 6
+    }
+    mv.dshBreakPenalty = pen
+  } catch { /* registry 形状不对就不加价（退化成上游默认） */ }
   /* 🔴 2026-10-27 实机（session-514c21b6，**AI 自己记的账**）：
    *   「**床没了**：我在家附近用 noDig:false 走动时把 black_bed (-10,79,38) 挖掉，
    *     掉落的床 5 分钟后消失 → 重生点失效，要重做一张床」。
@@ -819,23 +835,10 @@ export function movements (self, { terrain = null, digFirst = false } = {}) {
     else mv.blocksToAvoid.add(lavaId)
     mv.__dshInLava = inLava
   }
-  /* 2026-10-23 用户实机（「收小麦为什么挖土」「你一直在挖耕地，实际是拆了」）：
-   *   下面是**田被毁掉的两条路**，都从"能不能站"这里堵：
-   *     ① 站在耕地上时 pathfinder 会跳，跳起再落下（fallDistance > 0.5）就把耕地踩成泥土
-   *        —— 原版 FarmBlock.onLandedUpon 的规则，玩家/生物都一样；
-   *     ② canDig 默认真，绕不过去就直接挖穿，挖的正是耕地/泥土。
-   *   耕地和土径**一律不进 A* 的落脚点** ⇒ 人只会在田埂/田外站着伸手收（收获判定是
-   *   眼睛→方块中心 ≤ 4.5，站边上照样收得到），既踩不到也挖不到。
-   *   挖穿那条另外还有 mc_dig 的 noDig 默认值兜（2026-10-23 同批改的）。 */
-  if (self.cfg?.protectFarmland !== false) {
-    try {
-      const reg = b.registry?.blocksByName
-      for (const nm of ['farmland', 'dirt_path']) {
-        const id = reg?.[nm]?.id
-        if (typeof id === 'number') mv.blocksToAvoid.add(id)
-      }
-    } catch { /* registry 形状不对就不加，不影响别的 */ }
-  }
+/* 2026-10-29 用户：“耕地 / 土径这两个去掉” —— 原来把 farmland / dirt_path
+ * 塞进 mv.blocksToAvoid（代价：踩上去会把耕地变回泥土、土径踩成泥土）。
+ * 代价是“唯一通路是耕地时 A* 直接 NoPath”—— 用户宁可踩坏也要能走。
+ * 现在耕地/土径就是普通可站方块；`protectFarmland` 配置项一并废弃。 */
   /* 🔴 2026-10-19 用户：「还有把末影传送门视为危险方块」——
    *    `blocksToAvoid` 是"这格**能不能站**"（`movements.js:233`），里面一旦混进传送门，
    *    A* 就永不生成"站进门里"的节点，人只会在门外打转（末地/下界都进不去）。

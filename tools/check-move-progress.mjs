@@ -102,21 +102,26 @@ const watchOpts = (clock) => ({ arrive: 1.6, ty: 64, now: clock.now, setTimer: c
 /* ═══════════════ ① 阶梯：纯函数 ═══════════════ */
 section('① 脱困阶梯的顺序与命名（纯函数）')
 {
-  ok(Array.isArray(MOVE_ESCAPES_DIG) && MOVE_ESCAPES_DIG.length === 5 && MOVE_ESCAPES_DIG.includes('breakAhead'),
-    '允许挖时阶梯五级，含"挖开挡路那格"', JSON.stringify(MOVE_ESCAPES_DIG))
-  ok(JSON.stringify(MOVE_ESCAPES_NODIG) === JSON.stringify(['repath', 'jump', 'clearHead', 'backoff', 'detour']),
+  /* 2026-10-29：加了 `climbUp`（往上挖一层再跳）——目标在头顶时光靠 jump/breakAhead 永远上不去。 */
+  ok(Array.isArray(MOVE_ESCAPES_DIG) && MOVE_ESCAPES_DIG.length === 7
+    && MOVE_ESCAPES_DIG.includes('descend') && MOVE_ESCAPES_DIG.includes('climbUp') && MOVE_ESCAPES_DIG.includes('breakAhead'),
+    '允许挖时阶梯七级，含"往下走""往上挖一层再跳"与"挖开挡路那格"', JSON.stringify(MOVE_ESCAPES_DIG))
+  ok(JSON.stringify(MOVE_ESCAPES_NODIG) === JSON.stringify(['repath', 'jump', 'descend', 'clearHead', 'backoff', 'detour']),
     '🔴 不挖时阶梯里**没有** breakAhead（以前空转一轮 2.4 秒，还写进 planTried 误导模型）；'
       + '2026-10-28 补了 clearHead（只清自己头顶那格 —— 挂在柱子顶上时唯一能脱困的动作）',
     JSON.stringify(MOVE_ESCAPES_NODIG))
   ok(escapeStepsFor(true) === MOVE_ESCAPES_NODIG && escapeStepsFor(false) === MOVE_ESCAPES_DIG && escapeStepsFor() === MOVE_ESCAPES_DIG,
     'escapeStepsFor(noDig) 按开关选阶梯')
-  ok(MOVE_ESCAPES_DIG[0] === 'repath' && MOVE_ESCAPES_DIG[1] === 'jump' && MOVE_ESCAPES_DIG[2] === 'breakAhead',
-    '🔴 允许挖时 breakAhead 提到 jump 之后（能挖就别绕远路）', MOVE_ESCAPES_DIG.join(' → '))
-  ok(MOVE_ESCAPES_NODIG[0] === 'repath' && MOVE_ESCAPES_NODIG[1] === 'jump' && MOVE_ESCAPES_NODIG[2] === 'clearHead'
-    && MOVE_ESCAPES_NODIG[3] === 'backoff',
+  ok(MOVE_ESCAPES_DIG[0] === 'repath' && MOVE_ESCAPES_DIG[1] === 'jump'
+    && MOVE_ESCAPES_DIG[2] === 'descend' && MOVE_ESCAPES_DIG[3] === 'climbUp' && MOVE_ESCAPES_DIG[4] === 'breakAhead',
+    '🔴 允许挖时顺序 = 重算 → 跳跃 → 往上挖 → 挖开挡路（能挖就别绕远路）', MOVE_ESCAPES_DIG.join(' → '))
+  ok(MOVE_ESCAPES_NODIG[0] === 'repath' && MOVE_ESCAPES_NODIG[1] === 'jump' && MOVE_ESCAPES_NODIG[2] === 'descend' && MOVE_ESCAPES_NODIG[3] === 'clearHead'
+    && MOVE_ESCAPES_NODIG[4] === 'backoff',
     '🔴 不挖时顺序 = 用户要求的「重算路径 → 跳跃脱困 → 清头顶 → 后退再寻路」'
       + '（清头顶插在 jump 之后：先确认"跳也白跳"再动镐）', MOVE_ESCAPES_NODIG.join(' → '))
-  ok(escapeStepOf(0, MOVE_ESCAPES_DIG) === 'repath' && escapeStepOf(1, MOVE_ESCAPES_DIG) === 'jump' && escapeStepOf(2, MOVE_ESCAPES_DIG) === 'breakAhead',
+  ok(escapeStepOf(0, MOVE_ESCAPES_DIG) === 'repath' && escapeStepOf(1, MOVE_ESCAPES_DIG) === 'jump'
+    && escapeStepOf(2, MOVE_ESCAPES_DIG) === 'descend' && escapeStepOf(3, MOVE_ESCAPES_DIG) === 'climbUp'
+    && escapeStepOf(4, MOVE_ESCAPES_DIG) === 'breakAhead',
     'escapeStepOf(n, steps) 按序给动作')
   ok(escapeTextOf('repath') === '重算路径' && escapeTextOf('jump') === '跳跃脱困' && escapeTextOf('backoff') === '后退再寻路',
     'escapeTextOf 的中文名（日志与返回值文案用）')
@@ -476,8 +481,10 @@ function mkCtx (self, clock) {
   ok(!/再叫一次 mc_move 往同一个目标走/.test(r.hint ?? ''), '不误报成"再叫一次就好"')
   const escLogs = self.logs.filter((m) => /第 \d+ 步|脱困/.test(m))
   ok(escLogs.length === MOVE_ESCAPES.length, '每级脱困各记一行日志', String(escLogs.length))
-  ok(/重算路径/.test(escLogs[0] ?? '') && /跳跃脱困/.test(escLogs[1] ?? '') && /挖开挡路那格再走/.test(escLogs[2] ?? ''),
-    '日志按阶梯顺序（允许挖：重算路径 → 跳跃脱困 → 挖开 → 后退 → 侧向绕行）', JSON.stringify(escLogs.map((s) => s.slice(0, 30))))
+  ok(/重算路径/.test(escLogs[0] ?? '') && /跳跃脱困/.test(escLogs[1] ?? '')
+    && /往下挖一层/.test(escLogs[2] ?? '') && /往上挖一层再跳/.test(escLogs[3] ?? '')
+&& /挖开挡路那格再走/.test(escLogs[4] ?? ''),
+    '日志按阶梯顺序（允许挖：重算 → 跳跃 → 往下 → 往上挖 → 挖开 → 后退 → 侧向绕行）', JSON.stringify(escLogs.map((s) => s.slice(0, 30))))
   ok(bot.controls.some(([k, v]) => k === 'jump' && v === true), '真的按过 jump（跳跃脱困不是空话）')
   ok(bot.controls.some(([k, v]) => k === 'back' && v === true), '真的按过 back（后退再寻路不是空话）')
   ok(clock.live === 0, '🔴 收尾时采样器定时器全清掉（不然把进程钉住）')
@@ -658,7 +665,8 @@ section('⑨ noTower（逃跑时关掉"原地垫高"）')
   ok(/if \(noTower\) mv\.allow1by1towers = false/.test(src), '🔴 关的是 allow1by1towers 这一个开关')
   ok(!/mv\.scafoldingBlocks = \[\]/.test(src), '🔴 绝不清空 scafoldingBlocks（那会把 1×1 柱子的 move 一起剪掉，掉坑里出不来）')
   /* 2026-10-22：walkTo 已拆成「包装层 + walkToUnguarded」，断言改查后者（同样带 towerFallback）。 */
-  ok(src.includes(`noTower = true, towerFallback = true, intent = 'near', waterRecover, noDig = false, xz = false } = {}, ctx = {})`), 'walkTo 也接 noTower，且**默认 true**（不垫柱 —— 2026-10-18 实机：垫柱放错就摔死）')
+  ok(/noTower = true,[^}]*towerFallback = true,[^}]*intent = 'near', waterRecover, noDig = false, xz = false \} = \{\}, ctx = \{\}\)/.test(src),
+    'walkTo 也接 noTower，且**默认 true**（不垫柱 / 不搭桥 —— 2026-10-18 实机：垫柱放错就摔死）')
   /* 🔴 2026-10-17（用户："自动战斗的优先级不应该比 AI 高"）：战斗层**不再自己撤退**，
    *    所以"撤退要关掉垫脚"这条已经没有对象了 —— 反过来要守住"不许再出现撤退执行"。 */
   const atk = read('../src/attack.mjs')
@@ -1210,8 +1218,11 @@ section('⑧‴ 失败结果"可操作"：眼前挡路的那格 + 泳也算三�
    *   这四条钉的就是“按真字段说话 + 给得出方向”。 */
   {
     const cause = mod.moveCauseTextOf({ shaft: sh2, reason: 'NoPath', stuck: true })
-    ok(/困在竖井里/.test(cause) && !/井口 \s*）/.test(cause), '竖井文案不再出现空的“井口 ”', cause)
-    ok(/头顶 2 格净空|头上就是/.test(cause), '竖井文案按真字段说清头顶是什么', cause)
+    /* 🔴 2026-10-29：用户实机「是在树冠上，没有被包围」——头顶开阔、只有一面通，
+     *   叫它“竖井”会把模型带偏。现在只报事实：不出现“竖井”字样、不出现空的井口、头顶用“开阔”。 */
+    ok(!/竖井/.test(cause) && !/井口 \s*）/.test(cause), '不再叫“竖井”（它可能只是一块被围住的小空间）', cause)
+    ok(/头顶 2 格开阔|头上就是/.test(cause), '文案按真字段说清头顶有多高', cause)
+    ok(/四周是|四周全是实心方块/.test(cause), '文案报出四周是什么方块（不只是 n/e/s/w）', cause)
     const nx = mod.moveNextTextOf({ shaft: sh2, reason: 'NoPath', stuck: true }, true)
     ok(/挖过去|挖开|垫/.test(nx), '竖井时给得出方向（不再只说“换个目标点”）', nx)
     /* 这个假场景四面都是空气（所以四面都通）—— 钉的是“逐面判过、结果与 sides 键一致”，
@@ -1946,7 +1957,10 @@ section('⑲ 目标落点修正 / 起点半格修正')
    * 断言跟着改形状，**语义没变**（不给 xz 时仍走它）。 */
   ok(/: standPointFor\(b, target\.x, target\.y, target\.z\)/.test(src),
     'walkPathfinder 真的用了 standPointFor（xz 目标是唯一例外）')
-  ok(/const sp = xz\n?\s*\?/.test(src) || /const sp = xz/.test(src), 'xz 目标不过 standPointFor（不替 AI 改目的地）')
+  /* 2026-10-30：`const sp` 改成了 `let sp`（半空目标要把 sp 换成底座）——
+   *    断言别钉 const/let 这种声明形式，钉的是“xz 分支不调 standPointFor”。 */
+  ok(/\b(?:let|const) sp = xz/.test(src)
+    && /sp = xz\n?\s*\?/.test(src), 'xz 目标不过 standPointFor（不替 AI 改目的地）')
   ok(/const startY = standFeetY\(b, start\)/.test(src), 'walkPathfinder 真的修正了起点 y')
   ok(/goalAdjusted/.test(src) && /goalAskedAt/.test(src), '目标被挪过会如实报回去')
   ok(/tightened: true/.test(src) && /radius: 0/.test(src),
@@ -2242,7 +2256,7 @@ section('㉒ 补挖的方向只认主轴 / 对角受限 / 有总预算')
   const sidePushes = (src.match(/dirs\.push\(\[0, sz\]\)/g) || []).length
   ok(sidePushes === 2, '副轴方向只剩 doorOnRoute 那两行（carve/obstacle 不再看侧墙）', 'count=' + sidePushes)
   ok(/export function doorOnRoute/.test(src) && /cells \+ 1/.test(src), 'doorOnRoute 仍然往前进走廊里多看一格（保护门，不退化）')
-  ok(/export const MOVE_CARVE_TOTAL = 6/.test(src), '一次 mc_move 有挖掘总预算')
+  ok(/export const MOVE_CARVE_TOTAL = \d+/.test(src), '一次 mc_move 有挖掘总预算（具体数值不钉 —— 2026-10-31 改成 24：时间才是真限制）')
   ok(/carved < MOVE_CARVE_TOTAL/.test(src), '🔴 预算真的用在补挖条件上（不是摆设）')
 }
 
@@ -2256,11 +2270,11 @@ section('㉒ 补挖的方向只认主轴 / 对角受限 / 有总预算')
  */
 section('㉓ 执行顺序：先便宜的、能绕就别挖；跨调用接着升级')
 {
-  ok(JSON.stringify(MOVE_PLAN) === JSON.stringify(['door', 'repath', 'jump', 'breakAhead', 'clearHead', 'backoff', 'detour', 'tower']),
-    '允许挖时的执行顺序 = 开门 → 重算 → 跳 → 挖 → 清头顶 → 后退 → 绕行 → 垫柱'
+  ok(JSON.stringify(MOVE_PLAN) === JSON.stringify(['door', 'repath', 'jump', 'descend', 'climbUp', 'breakAhead', 'clearHead', 'backoff', 'detour', 'tower']),
+    '允许挖时的执行顺序 = 开门 → 重算 → 跳 → 往上挖 → 挖挡路 → 清头顶 → 后退 → 绕行 → 垫柱'
       + '（`clearHead` 是 2026-10-28 补的：被自己垫的柱子顶进 1×1 竖井时，挡路的在正上方）',
     JSON.stringify(MOVE_PLAN))
-  ok(JSON.stringify(MOVE_PLAN_NODIG) === JSON.stringify(['door', 'repath', 'jump', 'clearHead', 'backoff', 'detour', 'tower']),
+  ok(JSON.stringify(MOVE_PLAN_NODIG) === JSON.stringify(['door', 'repath', 'jump', 'descend', 'clearHead', 'backoff', 'detour', 'tower']),
     '不挖时的执行顺序 = 开门 → 重算 → 跳 → 清头顶 → 后退 → 绕行 → 垫柱'
       + '（没有"挖开挡路那格"这一级；`clearHead` 是 2026-10-28 用户批准的例外：只清自己头顶一格）',
     JSON.stringify(MOVE_PLAN_NODIG))
@@ -2801,8 +2815,11 @@ section('㉒ 岩浆：泡在里面时自己上浮 + 找岸，不许交给 A*')
     'plugins.mjs 从 movement 引了 CARVE_PROTECTED')
   ok(/for \(const blk of b\??\.registry\?\.blocksArray \?\? \[\]\) \{[\s\S]{0,200}?CARVE_PROTECTED\.test\(nm\)[\s\S]{0,120}?mv\.blocksCantBreak\.add\(blk\.id\)/.test(plugSrc),
     '🔴 A* 也不许挖受保护方块（床/箱子/工作台/熔炉/信标/刷怪笼…）—— 实机里走路把家里的床挖了')
-  ok(/treeBlockIds\(b\)\) mv\.blocksCantBreak\.add\(id\)/.test(plugSrc) && /CARVE_PROTECTED\.test\(nm\)/.test(plugSrc),
-    '树（挖穿树冠）与受保护方块（不可逆损失）是 blocksCantBreak 里两条独立规则')
+  /* 🔴 2026-10-29：树再分两类——原木仍禁挖（挖了树塔），树叶改成“加价”（被树叶围住时得有路）。 */
+  ok(/treeBlockIds\(b, \{ leaves: false \}\)\) mv\.blocksCantBreak\.add\(id\)/.test(plugSrc) && /CARVE_PROTECTED\.test\(nm\)/.test(plugSrc),
+    '受保护方块与**原木**是 blocksCantBreak 里两条独立规则（树叶不在里面）')
+  ok(/mv\.dshBreakPenalty = pen/.test(plugSrc) && /isLeafBlock\(blk\.name\)/.test(plugSrc),
+    '树叶进“加价表”（mv.dshBreakPenalty）而不是禁挖名单')
 }
 
 /* 🔴 2026-10-27 实机（session-514c21b6）：AI 出岩浆后**身上还在烧**，站着吃东西被烧死
@@ -2880,7 +2897,8 @@ section('㉔ 悬空自救：清头顶那格 + 结果里报 airborne')
     const b = mkHeadBot(n)
     ok(await clearHeadCell(b, { levels: 1 }) === 0 && b.dug === 0, `头顶是 ${n} ⇒ 不动手`)
   }
-  for (const n of ['chest', 'crafting_table', 'farmland', 'oak_log', 'oak_leaves', 'bedrock', 'lava']) {
+  /* 🔴 2026-10-29：`oak_leaves` 从“不挖”名单里拿掉了（树叶改成加价，挖得动）。 */
+for (const n of ['chest', 'crafting_table', 'farmland', 'oak_log', 'bedrock', 'lava']) {
     const b = mkHeadBot(n)
     ok(await clearHeadCell(b) === 0 && b.dug === 0, `头顶是 ${n} ⇒ 不挖（保护名单 / 不可挖 / 不是方块）`)
   }
@@ -3214,5 +3232,133 @@ function mkDownBot (cells, at = [0, 64, 0], opts = {}) {
   }
 }
 
+/* ── ㉓ 垫方块两把锁：往上（allow1by1towers）与搭桥（allowBridge）各管一段 ────────
+ * 2026-10-29 用户：「加个 allowbridge」。0.6.41 把 vendor 三处垫方块入口全收进
+ * allow1by1towers 之后，爬高和填坑绑在一起；这里钉住它们各自独立。 */
+section('㉓ 垫方块两把锁：往上 / 搭桥分开')
+{
+  const mov = read('../src/movement.mjs')
+  const idx = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  ok(/mv\.allowBridge = !noBridge/.test(mov), 'walkPathfinder 按 noBridge 设置 mv.allowBridge（默认关）')
+  ok(/noBridge = true/g.test(mov) && (mov.match(/noBridge = true/g) ?? []).length >= 3,
+    'walkToUnguarded / walkToOnce / walkPathfinder 三层的 noBridge 默认 true')
+  ok(/noBridge,/.test(mov), 'walkToOnce 调 walkPathfinder 时把 noBridge 透传下去')
+  ok(/noBridge: args\.allowBridge !== true/.test(idx), 'mc_move 把 allowBridge 翻成 noBridge 传进去')
+  ok(/allowBridge: \{ type: 'boolean'/.test(idx), '工具参数里声明了 allowBridge')
+}
+
+/* ── ㉔ allowBridge = 自动搭路（A* 没路时自己铺桥）────────────────────────────
+ * 2026-10-29 用户：「allowBridge 是新功能，允许自动搭路。和之前的没关系」。 */
+section('㉔ allowBridge：自动搭路')
+{
+  const mov = read('../src/movement.mjs')
+  ok(/export async function bridgeToward \(self, b, target/.test(mov), 'bridgeToward() 导出（走路里能主动铺桥）')
+  ok(/export const MOVE_BRIDGE_TRIES = 3/.test(mov) && /export const MOVE_BRIDGE_STEPS = 4/.test(mov),
+    '一次调用最多试 3 轮、每轮最多铺 4 格')
+  ok(/if \(emptyNoPath && !noBridge && bridgeTries < MOVE_BRIDGE_TRIES/.test(mov),
+    '只在“A* 没路 + 开了 allowBridge”时才铺桥（默认一格都不铺）')
+  ok(/if \(dx && dz\) return \{ ok: false, why: 'not-straight' \}/.test(mov), '斜着不铺（只走直线）')
+  ok(/minHealth: MOVE_BRIDGE_MIN_HEALTH/.test(mov), '铺桥带血量门槛（bridge.mjs 自己判悬空/岩浆/深空）')
+  ok(/bridgePlaced > 0 \? \{ bridgePlaced \}/.test(mov), '结果里报 bridgePlaced')
+}
+
+/* 🔴 2026-10-29 用户：“需要加判定，血量<10 就还是 3”—— dropThrough 的落差上限随血量走。 */
+{
+  ok(mod.MOVE_DROP_MAX === 4 && mod.MOVE_DROP_MAX_LOW_HP === 3,
+    '落差上限：平时 4、血少 3', `$ {mod.MOVE_DROP_MAX}/$ {mod.MOVE_DROP_MAX_LOW_HP}` .replace(/\$ /g, '$'))
+  ok(mod.dropMaxOf({ health: 9 }) === 3, '血 9 ⇒ 只敢掉 3 格', String(mod.dropMaxOf({ health: 9 })))
+  ok(mod.dropMaxOf({ health: 10 }) === 7, '血 10 ⇒ 7 格（按“最多掉 40% 血”反推）', String(mod.dropMaxOf({ health: 10 })))
+  ok(mod.dropMaxOf({ health: 20 }) === 11, '满血 ⇒ 11 格（伤害 8 = 血量的 40%）', String(mod.dropMaxOf({ health: 20 })))
+  ok(mod.dropMaxOf({}) === 11, '读不到血量就当满血（不能因为 undefined 就变成 3）', String(mod.dropMaxOf({})))
+  ok(mod.dropMaxOf({ health: 100 }) === mod.MOVE_DROP_HARD_MAX, '再满的血也不超过硬上限（别把“跳下去”变成“摔死”）', String(mod.dropMaxOf({ health: 100 })))
+}
+/* ⑩ 内部事件码不许裸奔到模型面前
+ *   🔴 2026-10-31 用户实机：「现在一直 mc_say · path-reset」。只要 cause 里出现英文内部码，
+ *   模型就会一遍遍念它。 */
+{
+  const codes = ['path-reset', 'PathStopped', 'preempted', 'block-changed', 'budget', 'swim-budget', 'unreachable', 'xyzzy', '']
+  for (const c of codes) {
+    const cause = String(mod.moveCauseTextOf({ reason: c }))
+    ok(!/[A-Za-z]/.test(cause), `内部码「${c || '空'}」不裸奔到 cause —— ${cause}`, cause)
+  }
+  ok(!/改一下环境/.test(mod.moveNextTextOf({ reason: 'xyzzy' }, true)),
+    '兜底不再说“先改一下环境”', mod.moveNextTextOf({ reason: 'xyzzy' }, true))
+  ok(/接着走/.test(mod.moveNextTextOf({ reason: 'path-reset' }, true)),
+    'path-reset 时说“直接再叫一次接着走”', mod.moveNextTextOf({ reason: 'path-reset' }, true))
+}
+
+/* ⑪ 单格挖掘守卫按实测时间
+ *   🔴 2026-10-31 用户实机：`noDig:false` 还是一格挖不开。真因是守卫写死 3000ms，
+ *   而空手挖石头要 7.5 秒 ⇒ 每下都被掀断、进度归零。 */
+{
+  const srcMv = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  ok(/const needMs = Number\.isFinite\(ms0\) && ms0 > 0 \? ms0 \+ 1_200 : 0/.test(srcMv) && /const ms0 = Number\(breakMsNow\(b, blk\)\)/.test(srcMv),
+    '单格挖掘守卫按实测挖掘时间给上限（不再写死 3 秒）')
+  ok(/const guardMs = Math\.max\(Number\(digMs\) \|\| 0, needMs\)/.test(srcMv), '守卫 = max(传入下限, 实测需要)')
+  ok(/__carveTooSlow/.test(srcMv), '“挖太久”单独记一笔')
+  ok(mod.moveNextTextOf({ planTried: ['tooSlow'], stuck: true }, true).includes('接着挖'),
+    '提示说“直接再叫一次接着挖，别换目标”', mod.moveNextTextOf({ planTried: ['tooSlow'] }, true))
+}
+
+/* ─────────── ㉗ 头顶堵着垫不了柱：先挖开再垫（2026-10-31） ─────────── */
+section('㉗ 目标在上方、包里又有方块 ⇒ A* 要垫柱子但头顶堵着：先挖开头顶再垫')
+{
+  const mkT = (heads) => ({
+    entity: { position: { x: 0.5, y: 64, z: 0.5 } },
+    blockAt: (v) => {
+      const dy = Number(v?.y) - 64
+      return heads[dy]
+        ? { name: heads[dy], boundingBox: 'block', hardness: 2, position: v }
+        : { name: 'air', boundingBox: 'empty', position: v }
+    },
+  })
+  const withPlace = (b) => {
+    b.pathfinder = { path: [{ x: 0, y: 64, z: 0 }, { x: 0, y: 65, z: 0, toPlace: [{ x: 0, y: 64, z: 0 }] }] }
+    return b
+  }
+  ok(mod.towerHeadBlocked(withPlace(mkT({ 1: 'stone', 2: 'stone' }))) === 'stone',
+    '㉗ 要垫柱、头顶实心 ⇒ 认得出是那块石头', String(mod.towerHeadBlocked(withPlace(mkT({ 1: 'stone', 2: 'stone' })))))
+  ok(mod.towerHeadBlocked(withPlace(mkT({}))) === null,
+    '㉗ 要垫柱、头顶本来就空 ⇒ 不拦（上游自己会垫）', String(mod.towerHeadBlocked(withPlace(mkT({})))))
+  const noPlace = mkT({ 1: 'stone' })
+  noPlace.pathfinder = { path: [{ x: 0, y: 64, z: 0 }, { x: 0, y: 64, z: 1 }] }
+  ok(mod.towerHeadBlocked(noPlace) === null,
+    '㉗ 下一步不是垫方块 ⇒ 不管（那是普通的走/挖）', String(mod.towerHeadBlocked(noPlace)))
+  ok(mod.towerHeadBlocked({}) === null && mod.towerHeadBlocked(null) === null,
+    '㉗ 没有寻路路径也不炸', 'ok')
+
+  const { readFile } = await import('node:fs/promises')
+  const src = await readFile(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  ok(/const headBlocked = towerHeadBlocked\(b\)/.test(src),
+    '㉗ 主循环每轮算路前先问一次“要垫柱但头顶堵着吗”', 'towerHeadBlocked(b)')
+  ok(/await clearHeadForTower\(b, \{ ctx \}\)/.test(src),
+    '㉗ 认下来就动手挖开头顶（不是只记一笔）', 'clearHeadForTower')
+  ok(/headTowerTries < MOVE_HEAD_TOWER_TRIES/.test(src),
+    '㉗ 有次数上限，别在挖不动的墙上反复试', 'MOVE_HEAD_TOWER_TRIES')
+  ok(/if \(!noTower && carveNoPathOk && headTowerTries/.test(src),
+    '㉗ 只在“允许垫柱 + 允许挖”时才这么干（noDig 那趟不碰地形）', 'noTower')
+  ok(/export const MOVE_HEAD_TOWER_TRIES = 3/.test(src),
+    '㉗ 上限常量在位', 'MOVE_HEAD_TOWER_TRIES = 3')
+}
+
+/* 🔴 2026-10-29 实机：`headTower`（头顶挡着先挖开再垫）用了 `carveNoPathOk`，
+ *    而它原来在 300 行之后才 `const` ⇒ 每次 mc_move 都在 9ms 抛
+ *    `ReferenceError: carveNoPathOk is not defined`，日志里只看到 `walk-failed`。
+ *    这条钉“先声明、后使用”，同类 TDZ 再来一次就会红。 */
+{
+  const tdzSrc = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  const decl = tdzSrc.indexOf('const carveNoPathOk =')
+  const use = tdzSrc.indexOf('carveNoPathOk && headTowerTries')
+  ok(decl > 0 && use > decl, 'carveNoPathOk 先声明后使用（TDZ 会让整趟寻路 9ms 抛错）', `decl=${decl} use=${use}`)
+}
+/* 🔴 2026-10-30 实机（“第一次为什么垫一个方块就不够了”）：自动重发的“有没有靠近”
+ *    原来只比水平距离 —— 目标在头顶时垫柱升 2 格、水平纹丝不动，被判成“没动”，
+ *    3 次就交回脱困阶梯，一趟只垫 1~2 格。垂直必须一起比。 */
+{
+  const nearSrc = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  const nearH = (nearSrc.match(/Math\.hypot\(pNow\.x - sp\.x, pNow\.z - sp\.z, pNow\.y - tyNum\)/g) ?? []).length
+  const nearK = (nearSrc.match(/Math\.hypot\(pK\.x - sp\.x, pK\.z - sp\.z, pK\.y - tyNum\)/g) ?? []).length
+  ok(nearH === 1 && nearK === 1, '“有没有靠近”按 3D 距离算（垂直上升也算进展，否则垫柱永远被判空转）', `h=${nearH} k=${nearK}`)
+}
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

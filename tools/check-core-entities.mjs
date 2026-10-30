@@ -296,8 +296,8 @@ section('⑨ 静态检查（实体工具已并进 mc_observe 感知块、不看�
    * 所以这条断言跟着放宽成"夹在 1..48"，别把实现写法钉死。 */
   ok(/const R = Math\.min\(Math\.max\((?:num\(radius, 16\)|radius), 1\), 48\)/.test(scanSrc), 'scanAround 的半径上限是 48')
   ok(/^import \{ scanAround, entitiesNear \} from '\.\/world-scan\.mjs'$/m.test(core), 'core.mjs 确实从 world-scan.mjs 导入（别只搬不接）')
-  ok(/entities \(radius = 24, opts = \{\}\) \{ return entitiesNear\(this\.requireBot\(\), radius, opts\) \}/.test(core), 'entities 是薄包装（照样先 requireBot）')
-  ok(/scan \(opts = \{\}\) \{ return scanAround\(this\.requireBot\(\), opts\) \}/.test(core), 'scan 是薄包装（照样先 requireBot）')
+  ok(/entities \(radius = 24, opts = \{\}\) \{ return entitiesNear\(this\.requireBot\((?:[^)]*)\), radius, opts\) \}/.test(core), 'entities 是薄包装（照样先 requireBot）')
+  ok(/scan \(opts = \{\}\) \{ return scanAround\(this\.requireBot\((?:[^)]*)\), opts\) \}/.test(core), 'scan 是薄包装（照样先 requireBot）')
   ok(!/^  entities \(radius = 24, \{ kind = 'all'/m.test(core) && !/^  scan \(\{ radius = 16/m.test(core), 'core.mjs 里没有残留的 scan/entities 实现')
   ok(/b\?\.util\?\.entity/.test(scanSrc), 'world-scan.mjs 走现成的 bot.util.entity 助手')
 

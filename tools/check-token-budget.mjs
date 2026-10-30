@@ -213,7 +213,7 @@ ok(/recentChat \(n = 10\) \{ return this\.chat\.slice\(-n\) \}/.test(CORE), 'rec
 
 section('5. 瘦身不许丢功能')
 const SCAN = read('src/world-scan.mjs')
-ok(/entities \(radius = 24, opts = \{\}\) \{ return entitiesNear\(this\.requireBot\(\), radius, opts\) \}/.test(CORE), 'core.entities 是薄包装（照样先 requireBot）')
+ok(/entities \(radius = 24, opts = \{\}\) \{ return entitiesNear\(this\.requireBot\((?:[^)]*)\), radius, opts\) \}/.test(CORE), 'core.entities 是薄包装（照样先 requireBot）')
 ok(/export function entitiesNear \(b, radius = 24, \{ kind = 'all', limit = 40 \} = \{\}\) \{/.test(SCAN), 'entitiesNear 的签名没变（limit 上限仍由调用方给；实现在 src/world-scan.mjs）')
 ok(/const R = Math\.min\(Math\.max\(Number\(radius\) \|\| 24, 1\), 128\)/.test(SCAN), 'entitiesNear 的半径上限仍是 128（在 src/world-scan.mjs）')
 ok(/slice\(0, 70\)/.test(INDEX), 'recentChat 每条仍截断（70 字）')

@@ -74,6 +74,24 @@ console.log(`vendor: ${VENDOR}`)
 console.log('mineflayer-pathfinder/index.js:')
 
 rep(
+  '  let placing = false\n  let placingBlock = null',
+  '  let placing = false\n  /* 🔴 2026-10-30 DSH：自己放/自己挖造成的变化不算“路没了”（垫柱每垫一格都会改脚下那格）。\n   * ① `placing` / `digging` 期间（正自己在动）直接忽略；\n   * ② DSH 侧绕过 pathfinder 单独放/挖的，用 `bot.pathfinder.markExpected(pos)` 预登记，\n   *    命中一次就消费掉；5 秒没命中自动过期（防泄漏）。 */\n  const expectedChanges = new Map()\n  const EXPECTED_TTL_MS = 5000\n  const posKeyOf = (p) => `${Math.floor(Number(p?.x))},${Math.floor(Number(p?.y))},${Math.floor(Number(p?.z))}`\n  function takeExpected (p) {\n    const k = posKeyOf(p)\n    const t = expectedChanges.get(k)\n    if (t == null) return false\n    expectedChanges.delete(k)\n    return Date.now() - t <= EXPECTED_TTL_MS\n  }\n  let placingBlock = null',
+  '自己造成的变化不作废路径：expectedChanges + markExpected'
+)
+
+rep(
+  '  bot.on(\'blockUpdate\', (oldBlock, newBlock) => {\n    if (!oldBlock || !newBlock) return\n    if (isPositionNearPath(oldBlock.position, path) && oldBlock.type !== newBlock.type) {',
+  '  bot.on(\'blockUpdate\', (oldBlock, newBlock) => {\n    if (!oldBlock || !newBlock) return\n    /* 🔴 2026-10-30 DSH：自己造成的变化不作废路径。\n     *    实机：垫柱 1.3 秒垫了 2 格就被 `block_updated` 清空整条路，一趟只上 1~2 格。 */\n    if (placing || digging) return\n    if (takeExpected(oldBlock.position)) return\n    if (isPositionNearPath(oldBlock.position, path) && oldBlock.type !== newBlock.type) {',
+  'blockUpdate：自己放的/自己挖的不 resetPath'
+)
+
+rep(
+  '  bot.pathfinder = {}',
+  '  bot.pathfinder = {}\n  /* DSH：告诉 pathfinder「接下来这一格是我自己改的」—— blockUpdate 里消费掉，不作废路径。 */\n  bot.pathfinder.markExpected = (pos) => {\n    if (!pos) return\n    expectedChanges.set(posKeyOf(pos), Date.now())\n  }',
+  '暴露 bot.pathfinder.markExpected(pos)'
+)
+
+rep(
   '  let placingBlock = null\n  let lastNodeTime = performance.now()',
   '  let placingBlock = null\n  let placingStartedAt = 0\n  let placingBestY = 0\n  let digStartedAt = 0\n  let lastNodeTime = performance.now()',
   '计时变量：placingStartedAt / digStartedAt'
@@ -459,24 +477,21 @@ repIn(
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
   `    if (!blockC.physical) {
-      if (node.remainingBlocks === 0) return // not enough blocks to place`,
-  `    /* 🔴 2026-10-24 DSH 补丁（实机：浅水里卡住，垫方块 place_error ×8）：
-     * 水不是 physical，但它**能站**。原来没判 liquid，A* 把“目标格是水”当成“目标格是空气”，
-     * 于是规划出“往水里垫方块”的路 —— 而水下放置没有可依附的面，
-     * 服务端必拒（\`the block is still air\`）。表现：“完全卡住、动不了”。 */
-    if (!blockC.physical && !blockC.liquid) {
-      if (node.remainingBlocks === 0) return // not enough blocks to place`,
-  '水里不垫方块：jumpUp 目标格是水'
+      if (node.remainingBlocks === 0) return // not enough blocks to place
+
+      if (this.getNumEntitiesAt(blockC.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement`,
+  `    if (!blockC.physical && !blockC.liquid) return`,
+  'A* 不垫方块：jumpUp 目标格'
 )
 
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
   `      if (!blockD.physical) {
-        if (node.remainingBlocks === 1) return // not enough blocks to place`,
-  `      /* 🔴 2026-10-24 DSH 补丁：脚下那格是水也不垫。 */
-      if (!blockD.physical && !blockD.liquid) {
-        if (node.remainingBlocks === 1) return // not enough blocks to place`,
-  '水里不垫方块：脚下那格是水'
+        if (node.remainingBlocks === 1) return // not enough blocks to place
+
+        if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement`,
+  `    if (!blockD.physical && !blockD.liquid) return`,
+  'A* 不垫方块：jumpUp 脚下那格'
 )
 
 /* ── 2026-10-25：move 不许"挖脚下"直上直下（用户：下矿应该挖阶梯） ──────── */
@@ -521,6 +536,69 @@ repIn(
 
     if (blockC.liquid) return // dont go underwater`,
   'move 不挖脚下：getMoveDropDown'
+)
+
+/* ── 2026-10-29：均衡差不许在前方脚下垫方块（用户：「把这个功能去掉」） ──── */
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `    if (!blockD.physical && !blockC.liquid) {
+      if (node.remainingBlocks === 0) return // not enough blocks to place
+
+      if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // D intersects an entity hitbox
+
+      if (!blockD.replaceable) {
+        if (!this.safeToBreak(blockD)) return
+        cost += this.breakLabor(blockD)
+        toBreak.push(blockD.position)
+      }
+      cost += this.exclusionPlace(blockC)
+      toPlace.push({ x: node.x, y: node.y - 1, z: node.z, dx: dir.x, dy: 0, dz: dir.z })
+      cost += this.placeCost // additional cost for placing a block
+    }`,
+  `    if (!blockD.physical && !blockD.liquid) return
+
+    cost += this.safeOrBreak(blockB, toBreak)`,
+  'move 不在前方脚下垫方块：getMoveForward'
+)
+
+
+
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `    if (!blockC.physical && !blockC.liquid) {
+
+      if (this.getNumEntitiesAt(blockC.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement`,
+  `    /* 🔴 2026-10-29 DSH 补丁（用户：「A* 底层“顺手垫一格”不要」）：
+     *    这一处是“跳上去时顺手垫一块台阶”，同样不看任何开关。
+     *    现在一律不垫：高低差走 DSH 的 climbUp（挖开斜上方两格跳上去）。 */
+    if (!blockC.physical && !blockC.liquid) return`,
+  'move 不在前方脚下垫方块：getMoveJumpUp'
+)
+
+
+
+
+/* ── 2026-10-29：jumpUp 不再在目标格下面顺手垫一格 ─────────── */
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `      cost += this.exclusionPlace(blockC)
+      toPlace.push({ x: node.x + dir.x, y: node.y - 1, z: node.z + dir.z, dx: 0, dy: 1, dz: 0 })
+      cost += this.placeCost // additional cost for placing a block`,
+  `    cost += this.exclusionPlace(blockC)
+    /* 🔴 2026-10-29 DSH 补丁：这里原本还要在目标格下面“顺手垫一格”，已禁用。 */`,
+  'A* 不垫方块：jumpUp 目标格下方'
+)
+
+/* ── 2026-10-29：树叶改成“加价”而不是“禁挖” ──────────────────── */
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `    return this.exclusionBreak(block) + (1 + 3 * digTime / 1000) * this.digCost`,
+  `    /* 🔴 2026-10-29 DSH 补丁：按方块类型加价（树叶 ×6）。
+     *    上游没有“这种方块挖起来很亏”的概念，只能禁掉；禁掉就把“被树叶围住”变成无路。
+     *    加价后：绕路 2~3 步 仍远便宜于挖树叶（约 28~46 步）⇒ 平时不往树上爬；真没别的路时 A* 就会挖。 */
+    const pen = (this.dshBreakPenalty && this.dshBreakPenalty[block.type]) || 1
+    return this.exclusionBreak(block) + (1 + 3 * digTime / 1000) * this.digCost * pen`,
+  'breakLabor 按类型加价（树叶）'
 )
 
 /* ── 其它补丁只做存在性检查（改法在踩坑档案里，不在这里重放） ───────────── */

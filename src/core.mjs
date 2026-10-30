@@ -2,8 +2,7 @@
 /**
  * dsh-mc-agent / core.mjs —— Minecraft 无头机器人核心（不依赖 DSH，可独立运行与测试）
  * ---------------------------------------------------------------------------
- * 从 mc-bridge/server.mjs 抽出来：连接/保活/世界读取/移动/挖掘/事件分发。
- * 供两处使用：
+ * 从 mc-bridge/server.mjs 抽出来：连接/保活/世界读取/移动/挖掘/事件分发。供两处使用：
  *   1. plugins/dsh-mc-agent/index.js（DSH 宿主插件，机器人跑在 DSH 进程里）
  *   2. dsh-mc-agent/standalone.mjs（脱离 DSH 单独跑，调试用）
  *
@@ -184,13 +183,13 @@ export const DEFAULTS = {
   authUser: process.env.MC_AUTH_USER ?? '',
   authPass: process.env.MC_AUTH_PASS ?? '',
   connectTimeoutMs: 45_000,
-  /* 🔴 2026-10-28 参数审计：原来 40_000（超单次硬上限 CALL_MS）—— "忘了传 budget"的内部走路会以为有 40 秒，实际 11 秒就被掐。 */
-  moveBudgetMs: CALL_BUDGET_MS,
+  moveBudgetMs: CALL_BUDGET_MS,   // 2026-10-28 参数审计：原来 40_000（超单次上限 CALL_MS）⇒“忘了传 budget”的内部走路以为有 40 秒
   preferDoors: true, doorDigPenalty: 8,   // 优先走门/绕路：给"挖墙"加代价（2026-10-18）
   walkDigFirst: true, walkDigFirstCost: 0.4,   // 2026-10-27：显式 noDig:false ⇒ 挖按"多走一步"计价，走最短那条（见 src\plugins.mjs 的 digFirst）
   walkDigDetourMax: 15,   // 2026-10-27：每挖一格额外按"多绕 N 步"记账 ⇒ 绕 ≤N 格不挖、超过才挖（用户：noDig:false 会挖家）
+  walkTowerCost: 4,   /* 2026-10-31：垫一格按“多绕 N 步”计价（上游 placeCost=1 太便宜）⇒ 能跳/能绕就不垫，只有真没路才垫 */
+  walkLeafDigPenalty: 6,   // 2026-10-29：树叶不进禁挖名单，改成每格按 ×N 记账（塞进 mv.dshBreakPenalty；0 = 回到禁挖）
   /* 2026-10-23：耕地/土径不进 A* 的落脚点（防踩坏、防挖开挡路的）。代价：唯一通路时寻路报 NoPath 而不是硬穿。 */
-  protectFarmland: true,
   chatHistory: 300,
   /* 自动重连最多试几次（以前没上限、5s→…→60s 无限重试，看门狗又让 AI 干等）。 */
   maxReconnectAttempts: 5,
@@ -245,7 +244,7 @@ import { connectionViewOf, statusOf } from './status.mjs'
  *  自检脚本/以后的外部调用点按名字找它，re-export 之后调用点一行都不用改。 */
 import { setupPathfinder, movements, setupPlugins } from './plugins.mjs'
 import { authOnly as authOnlyImpl, makeSession } from './auth-session.mjs'
-import { reportError, withBudget, stopPathing, interruptMove as interruptMoveImpl, setAbortSignal as setAbortSignalImpl, holdControl as holdControlImpl, releaseControls, requireBot as requireBotImpl, waitForChunks as waitForChunksImpl } from './runtime.mjs'
+import { reportError, withBudget, stopPathing, interruptMove as interruptMoveImpl, setAbortSignal as setAbortSignalImpl, holdControl as holdControlImpl, releaseControls, requireBot as requireBotImpl, waitForChunks as waitForChunksImpl, respawnNow as respawnNowImpl } from './runtime.mjs'
 import { connect as connectImpl, scheduleReconnect as scheduleReconnectImpl, disconnect as disconnectImpl } from './connection.mjs'
 export { MC_DEPS, loadMcDep, loadPathfinder, resetMcDepCache, resetPathfinderCache } from './plugins.mjs'
 
@@ -652,26 +651,26 @@ export class McBot extends EventEmitter {
     return statusOf(this.bot, {
       sub: this.sub, connection: this.connectionView(), lastError: this.lastError,
       reconnecting: this.reconnecting, reconnectPending: this.reconnectPending, connectedAt: this.connectedAt,
-    })
+    }, this)   /* 2026-10-29：第三参传实例（读 stats.deaths / _life）—— 不传就拿不到死亡记录 */
   }
 
   /* ───────────── 附近方块扫描（已搬到 src\world-scan.mjs，第十二刀） ───────────── */
 
   /** 周围方块：不点名给计数（前 25 种），点名给坐标列表（按到我的距离升序）。见 `src\world-scan.mjs` 的 `scanAround()`。 */
-  scan (opts = {}) { return scanAround(this.requireBot(), opts) }
+  scan (opts = {}) { return scanAround(this.requireBot({ allowDead: true }), opts) }
 
   /* ───────────── 地图（已搬到 src\map-render.mjs，第十一刀） ───────────── */
 
   /** 俯视地形（**地表图**）：见 `src\map-render.mjs` 的 `heightmapOf()`。
    *  2026-10-22：`mode:"cave"` / `"auto"` 和 `isUnderground()` 一起删了 —— 这里没有模式可选。 */
-  heightmap (opts = {}) { return heightmapOf(this.requireBot(), opts) }
+  heightmap (opts = {}) { return heightmapOf(this.requireBot({ allowDead: true }), opts) }
 
   /** 字符地形图（无视觉也能读） */
   static glyphMap (names, step = 2, selfIndex = null, opts = {}) { return glyphMapText(names, step, selfIndex, opts) }
 
   /** 俯视地形 → RGBA 像素图（视觉模型看图像比看字符强）；异步版把"网格→像素"交给 Worker 池（默认关）。 */
-  mapImage (opts = {}) { return mapImageOf(this.requireBot(), opts) }
-  mapImageAsync (opts = {}) { return mapImageOfAsync(this.requireBot(), opts) }
+  mapImage (opts = {}) { return mapImageOf(this.requireBot({ allowDead: true }), opts) }
+  mapImageAsync (opts = {}) { return mapImageOfAsync(this.requireBot({ allowDead: true }), opts) }
   /* ───────────── 行动 ───────────── */
 
   /**
@@ -780,7 +779,7 @@ export class McBot extends EventEmitter {
   async dig (opts = {}) { return await digImpl(this, opts, this.#mineCtx()) }
 
   /** 背包一览（`mc_inventory` 的正文）—— 实现在 `src\inventory.mjs`（`inventoryView`） */
-  inventory () { return inventoryView(this.requireBot()) }
+  inventory () { return inventoryView(this.requireBot({ allowDead: true })) }
 
   /* ───────────── 朝向（"看向我"就该用工具，不要用 /tp 指令） ───────────── */
 
@@ -788,7 +787,7 @@ export class McBot extends EventEmitter {
   static lookAnglesTo (from, to) { return lookAnglesTo(from, to) }
 
   /** 看向坐标或某个玩家/实体（who 传名字；英文名/玩家名/中文别名都认）—— 实现在 `src/camera.mjs` */
-  async lookAt (opts = {}) { return await lookAt(this.requireBot(), opts) }
+  async lookAt (opts = {}) { return await lookAt(this.requireBot({ allowDead: true }), opts) }
 
   /* ───────────── 放置 / 破坏（"搭高"就该用工具，不要用 /setblock） ───────────── */
 
@@ -856,6 +855,7 @@ export class McBot extends EventEmitter {
 
   /** 上浮换气（在水里按住 jump 游泳）—— 实现在 `src\movement.mjs` 的 `swimUp`。 */
   async swimUp (opts = {}) { return await swimUpImpl(this, opts, { bumpGen: () => this.#beginMove() }) }
+  async respawnNow () { return await respawnNowImpl(this) }
 
   /** 船/矿车：开（`look` 定方向 + `moveVehicle` 给动力）与下来（潜行，不是 dismount 包）—— `src\boat.mjs`。 */
   async driveBoat (target, opts = {}) { return await driveBoat(this, target, opts, { bumpGen: () => this.#beginMove() }) }
@@ -944,8 +944,8 @@ export class McBot extends EventEmitter {
 
   /* ───────────── 附近有谁（已搬到 src\world-scan.mjs，第十二刀） ───────────── */
   /** 附近有谁（怪 / 玩家 / 动物 / 掉落物）：名字、坐标、距离、上下差、血量、是不是远程。见 `src\world-scan.mjs` 的 `entitiesNear()`。 */
-  entities (radius = 24, opts = {}) { return entitiesNear(this.requireBot(), radius, opts) }
-  readBossBars () { return readBossBars(this.requireBot()) }           // Boss 血条（龙/凋灵的血只在 Boss Bar 里，实体元数据读不到）
+  entities (radius = 24, opts = {}) { return entitiesNear(this.requireBot({ allowDead: true }), radius, opts) }
+  readBossBars () { return readBossBars(this.requireBot({ allowDead: true })) }           // Boss 血条（龙/凋灵的血只在 Boss Bar 里，实体元数据读不到）
 
   /**
    * 发服务器指令（以玩家身份走聊天）。
@@ -953,7 +953,7 @@ export class McBot extends EventEmitter {
    * @param {{allow?: ((name:string)=>boolean)|null}} [opts] 白名单判定：默认用**内置**那份（保底，独立测试时不依赖插件配置）；插件层会传自己的可配置白名单进来（用户 2026-09-16 要求白名单可配置）。
    */
   command (cmd, { allow = null } = {}) {
-    const b = this.requireBot()
+    const b = this.requireBot({ allowDead: true })
     const c = String(cmd).trim()
     /* 🔴 换行符的聊天包会被服务端当场踢下线（2026-10-19 实机：10 条 /fill 拼多行 → `illegal_characters`）。这里挡死；多行用法走 `mc_command`（它逐条发）。 */
     if (/[\r\n]/.test(c)) throw new Error('一条 command() 只能发一条指令：换行符会让服务端以 illegal_characters 把我踢下线（mc_command 支持多行，它会逐条发）')

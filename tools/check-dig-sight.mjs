@@ -13,7 +13,7 @@
  */
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 
 let pass = 0, fail = 0
@@ -22,6 +22,7 @@ const ok = (cond, label, extra = '') => {
 }
 const section = (t) => console.log(`\n${t}`)
 
+const SRC_MINING = new URL('../src/mining.mjs', import.meta.url)
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const PROFILE = join(DSH_HOME, 'profiles', 'desktop')
 const req = (() => {
@@ -268,6 +269,91 @@ section('⑨ 挡路的是容器 / 基岩 ⇒ 不动它，把原因说清')
   ok(/挖不动/.test(r?.note ?? ''), '文案说"挖不动"', String(r?.note ?? '').slice(0, 110))
 }
 
+/* \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 \u2469 \u77ff\u5728\u811a\u4e0b 2 \u683c\uff1a\u4e2d\u95f4\u90a3\u5c42\u77f3\u5934\u5c31\u662f\u201c\u671d\u6211\u8fd9\u4e00\u9762\u201d\uff0c\u4e0d\u8bb8\u5224\u201c\u57cb\u6b7b\u201d \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+/* \U0001F534 2026-10-29 \u7528\u6237\uff1a\u300cmc_dig \u00b7 coal_ore \u4e0d\u6316\u811a\u5e95\u4e0b\u7684\u300d\u3002\u771f\u56e0\u662f\u201c\u56db\u9762\u5224\u636e\u201d\u53ea\u770b\u6c34\u5e73\u56db\u9762\u3001
+ *   \u201c\u6311\u671d\u6211\u8fd9\u4e00\u9762\u201d\u4e5f\u53ea\u6311\u6c34\u5e73\u56db\u9762 \u21d2 \u6316\u4e86\u65c1\u8fb9\u8fd8\u662f\u5224\u57cb\u6b7b\u3001\u6b7b\u5faa\u73af\u3002\u8fd9\u91cc\u9489\u4f4f\u201c\u811a\u4e0b\u90a3\u5c42\u5f53\u4e00\u9762\u7a7a\u201d\u3002 */
+section('\u2469 \u77ff\u5728\u811a\u4e0b 2 \u683c\u3001\u56db\u5468\u5168\u662f\u77f3\u5934 \u21d2 \u6316\u5f00\u811a\u4e0b\u90a3\u5c42\uff0c\u4e0d\u5f97\u62a5\u201c\u57cb\u6b7b\u201d')
+{
+  const gone = new Set()
+  const dugY = []
+  const mkB = (name, bb, x, y, z) => ({ name, type: 0, boundingBox: bb, position: new Vec3(x, y, z) })
+  const bot = {
+    entity: { position: new Vec3(0, 64, 0), onGround: true },
+    game: { gameMode: 'survival' },
+    registry: { itemsByName: {}, blocksByName: {}, items: {}, blocksByStateId: { 200: { name: 'coal_ore' } } },
+    inventory: { items: () => [] },
+    heldItem: null,
+    blockAt: (q) => {
+      if (!q) return null
+      if (gone.has(`${q.x},${q.y},${q.z}`)) return mkB('air', 'empty', q.x, q.y, q.z)
+      if (q.x === 0 && q.z === 0 && q.y === 62) return mkB('coal_ore', 'block', 0, 62, 0)
+      /* \u73a9\u5bb6\u81ea\u5df1\u5360\u7684\u4e24\u683c\u662f\u7a7a\u6c14 */
+      if (q.x === 0 && q.z === 0 && (q.y === 64 || q.y === 65)) return mkB('air', 'empty', 0, q.y, 0)
+      return mkB('stone', 'block', q.x, q.y, q.z)
+    },
+    findBlocks: () => [],
+    findBlock: () => null,
+    setControlState: () => {},
+    on: () => bot,
+    removeListener: () => {},
+    dig: async (blk) => { const q = blk?.position; if (q) { gone.add(`${q.x},${q.y},${q.z}`); dugY.push(q.y) } },
+    pathfinder: { goto: async () => {}, stop: () => {}, setMovements: () => {} },
+  }
+  const mc = mkMc({ bot, calls: { dig: 0 }, state: {}, target: null })
+  const r = await mc.breakBlock({ x: 0, y: 62, z: 0 })
+  ok(dugY.includes(62) && !dugY.includes(63),
+    '挖的是侧面那一层（y=62），不是自己脚下那格（y=63）—— 2026-10-31 改成侧面优先',
+    JSON.stringify(dugY))
+  ok(dugY.includes(62), '\u6700\u540e\u628a\u77ff\u672c\u8eab\u4e5f\u6316\u4e86', JSON.stringify(dugY))
+  ok(!/\u56db\u9762\u90fd\u88ab\u5b9e\u5fc3\u65b9\u5757\u5305\u7740|\u57cb\u6b7b/.test(JSON.stringify(r ?? {})) || r?.ok === true,
+    '\u4e0d\u518d\u62a5\u201c\u57cb\u6b7b\u201d', String(r?.note ?? '').slice(0, 90))
+}
+{
+  /* \u6e90\u7801\u5c42\u9762\uff1a\u5224\u636e\u5fc5\u987b\u662f\u516d\u9762\uff08\u542b \u00b1y\uff09\uff0c\u4e0d\u80fd\u53ea\u770b\u6c34\u5e73\u3002 */
+  const src = readFileSync(SRC_MINING, 'utf8')
+  ok(/const sides = \[\[0, 0, -1\], \[0, 0, 1\]/.test(src), 'canSeeBlockOf\uff1a\u5224\u636e\u542b\u4e0a\u4e0b\u4e24\u9762')
+  ok(/const dirs = \[\[0, -1, 0\], \[0, 1, 0\]/.test(src), 'faceTowardEye\uff1a\u6311\u9762\u4e5f\u542b\u4e0a\u4e0b\u4e24\u9762')
+}
+
 for (const d of TMP) { try { rmSync(d, { recursive: true, force: true }) } catch {} }
+/* ─────────── ⑪ 脚下的矿：挖侧面开缺口，不拆自己脚下 ─────────── */
+section('⑪ 矿在自己脚下 2 格 ⇒ 挖「离自己 1 格的侧面」，不去拆自己脚下那格（2026-10-31 用户：「挖离自己 1 格的方块，缺一格就能挖钻石」）')
+{
+  const world = new Map()
+  const mkc = (name, x, y, z) => ({ name, type: 0, boundingBox: name === 'air' ? 'empty' : 'block', position: new Vec3(x, y, z) })
+  const set = (n, x, y, z) => world.set(`${x},${y},${z}`, mkc(n, x, y, z))
+  for (let x = -3; x <= 3; x++) for (let y = 58; y <= 66; y++) for (let z = -3; z <= 3; z++) set('stone', x, y, z)
+  set('air', 0, 64, 0); set('air', 0, 65, 0)
+  set('dirt', 0, 63, 0)                 // 自己脚下垫着的那格
+  set('diamond_ore', 0, 62, 0)          // 目标：脚下 2 格
+  const dugCells = []
+  const bot = {
+    entity: { position: new Vec3(0, 64, 0), onGround: true },
+    game: { gameMode: 'survival' },
+    registry: { itemsByName: {}, blocksByName: {}, items: {}, blocksByStateId: { 200: { name: 'diamond_ore' } } },
+    inventory: { items: () => [] },
+    heldItem: null,
+    blockAt: (q) => (q ? (world.get(`${q.x},${q.y},${q.z}`) ?? null) : null),
+    findBlocks: () => [], findBlock: () => null,
+    setControlState: () => {}, on: () => bot, removeListener: () => {},
+    equip: async () => {},
+    dig: async (blk) => {
+      const q = blk?.position
+      if (!q) return
+      dugCells.push({ x: q.x, y: q.y, z: q.z })
+      set('air', q.x, q.y, q.z)
+    },
+    pathfinder: { goto: async () => {}, stop: () => {}, setMovements: () => {} },
+  }
+  const mc = mkMc({ bot, calls: { dig: 0 } })
+  const out = await mc.dig({ pos: { x: 0, y: 62, z: 0 } })
+  ok(!dugCells.some((c) => c.x === 0 && c.y === 63 && c.z === 0),
+    '⑪ 没有去挖自己脚下那格（拆立足点）', JSON.stringify(dugCells))
+  ok(dugCells.some((c) => c.y === 62 && (c.x !== 0 || c.z !== 0)),
+    '⑪ 挖的是水平侧面（开一个缺口）', JSON.stringify(dugCells))
+  ok(out.some((l) => /挖掉 diamond_ore/.test(l)),
+    '⑪ 缺口一开就把钻石矿挖了', JSON.stringify(out).slice(0, 140))
+}
+
 console.log(`\ncheck-dig-sight：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

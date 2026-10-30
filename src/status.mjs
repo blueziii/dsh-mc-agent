@@ -38,8 +38,11 @@ export function connectionViewOf (profile) {
  * @param {object|null} b mineflayer bot
  * @param {{sub?: string|null, connection?: object|null, lastError?: string|null,
  *          reconnecting?: boolean, reconnectPending?: boolean, connectedAt?: number}} ctx
+ * @param {object|null} self McBot 实例（可选）—— 只用来读 `stats.deaths` / `_life`（死亡次数与上次死在哪）。
+ *   ⚠️ 2026-10-29：`dead`/`deaths` 那两行引用了 `self` 但签名里没有，一调用就
+ *   `ReferenceError: self is not defined`（用户实机报的 `mc_observe` 崩）。现在当可选参传进来。
  */
-export function statusOf (b, ctx = {}) {
+export function statusOf (b, ctx = {}, self = null) {
   // 连的哪个服（用户 2026-09-16："状态条别只写'在游戏中'，要显示服务器地址"）。
   // 只回地址/端口/子服，**不含账号与凭据**；前端负责"太长就截断"。
   const connection = ctx.connection ?? null
@@ -90,6 +93,10 @@ export function statusOf (b, ctx = {}) {
     yaw: b.entity.yaw, pitch: b.entity.pitch,
     gamemode: b.game?.gameMode, dimension: b.game?.dimension, time: b.time?.timeOfDay,
     health: b.health, food: b.food, players: Object.keys(b.players ?? {}),
+    /* 2026-10-29：死着（没重生）要能一眼看出来 —— 现在不自动重生，要叫 mc_act { mode: "respawn" }。 */
+    ...(b.isAlive === false ? { dead: true, ...(self?._life?.position ? { diedAt: self?._life?.position } : {}) } : {}),
+    /* 2026-10-29：死过几次、上次死在哪 —— 以前完全看不到（用户：「为什么 ai 死了好像不知道」）。 */
+    ...(self?.stats?.deaths || self?._life ? { deaths: self?.stats?.deaths ?? 0, ...(self?._life?.position ? { lastDeath: self?._life?.position } : {}) } : {}),
     held: b.heldItem ? `${b.heldItem.name}x${b.heldItem.count}` : null,
     uptimeSec: Math.round((Date.now() - ctx.connectedAt) / 1000),
     /* 连接假死（2026-10-23 实机：用户"完全卡住，tp 也不行，只能重进"）：多久没收到任何包。

@@ -330,7 +330,7 @@ const useSrc = strip(readFileSync(new URL('../src/world-use.mjs', import.meta.ur
     'equip 的 held 读回来，并且如实返回 equipped（heldText 在 inventory.mjs，equip 实现在 world-use.mjs）')
   // 路线图第 ④ 条第三十六/三十七刀：`walkTo` / `#walkPathfinder` 已搬进 `src\movement.mjs`。
   const movSrc = strip(readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8'))
-  ok(/const noProgress = moved < 0\.6/.test(movSrc) && /是真没走通/.test(movSrc)
+  ok(/const noProgress = [^\n]*vRose < 0\.75[^\n]*moved < 0\.6/.test(movSrc) && /是真没走通/.test(movSrc)
     && /from '\.\/movement\.mjs'/.test(coreSrc), 'walkTo 一格没挪时如实说（实现已搬到 src\\movement.mjs）')
 
   ok(/export function chestSnap \(win\)/.test(chestSrc) && /真放进去了/.test(chestSrc),

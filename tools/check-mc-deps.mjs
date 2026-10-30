@@ -199,6 +199,30 @@ section('5. mineflayer 放置等待超时（上游 5000ms 太长，幽灵方块�
       Number.isFinite(t) ? `现在是 ${t}ms —— 重装 vendor 后要重打：cp 备份/mineflayer-补丁备份/place_block.js.已打补丁 回去` : '读不到 timeout')
   }
 }
+// ── 6. pathfinder 底层一律不垫方块 ───────────────────────────
+section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做）')
+/* 2026-10-29 用户：「A* 底层“顺手垫一格”不要」。上游 getMoveForward 与 getMoveJumpUp
+ * 在“前方脚下是空”时会默默垫方块（不看任何开关）。现在两处都直接 return：
+ * A* 只管“走现成地面”；褭桥由 `bridgeToward`（mc_move{allowBridge}）、
+ * 高低差由 `climbUp` / `stepDown` 去做。只剩原地垒柱子（getMoveUp）仍由 allow1by1towers 管。 */
+{
+  const mj = join(VN, 'mineflayer-pathfinder', 'lib', 'movements.js')
+  if (!existsSync(mj)) {
+    console.log('  · 没有 mineflayer-pathfinder/lib/movements.js（跳过）')
+  } else {
+    const src = readFileSync(mj, 'utf8')
+    ok(/if \(!blockD\.physical && !blockD\.liquid\) return/.test(src)
+      && /if \(!blockC\.physical && !blockC\.liquid\) return/.test(src),
+      'getMoveForward / getMoveJumpUp：前方脚下为空就 return（不垫方块）',
+      '重装 vendor 后要重打：node tools/patch-mc-deps.mjs')
+    ok(!/this\.allowBridge/.test(src), 'vendor 里已不再读 allowBridge（搭路不靠 A*）')
+    ok(/allow1by1towers[\s\S]{0,3000}?toPlace\.push/.test(src),
+      '原地垒柱子（getMoveUp）仍受 allow1by1towers 管（allowTower 功能没丢）')
+    /* jumpUp 里“在目标格下面垫一格”也应消失 */
+    ok(!/y: node\.y - 1, z: node\.z \+ dir\.z, dx: 0, dy: 1, dz: 0 \)/.test(src),
+      'getMoveJumpUp：不再在目标格下面顺手垫一格')
+  }
+}
 
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败项'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

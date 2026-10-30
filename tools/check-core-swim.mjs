@@ -428,7 +428,7 @@ section('⑧ 静态接线：core / index 都在')
   ok(!/mode === 'swim'/.test(index), 'index.js 的 mc_move 已经没有 swim 分支了')
   ok(!/sess\.bot\.swimUp\(\{ hold: callBudget/.test(index), 'index.js 里不再有"只上浮"的分支（上浮由 walkSwim 自己按 jump）')
   /* 2026-10-15：walkTo 的返回值现在过 `withOutcome(..., { expect: 'moved' })`（结果台账要判得动）。 */
-  ok(/walkWithAutoDig\(sess, target, \{ noDig, noTower: args\.allowTower !== true, intent: intentArgOf\(args\.intent\), waterRecover: typeof args\.waterRecover === 'boolean' \? args\.waterRecover : undefined, xz: wantsXZ \}/.test(index), 'walk 仍走 walkWithAutoDig（走不通改成挖；自救开关透传）')
+  ok(/walkWithAutoDig\(sess, target, \{ noDig,[^}]*?noTower: args\.allowTower !== true[^}]*?intent: intentArgOf\(args\.intent\)[^}]*?waterRecover: typeof args\.waterRecover === 'boolean'[^}]*?xz: wantsXZ \}/.test(index), 'walk 仍走 walkWithAutoDig（走不通改成挖；自救开关透传）')
   ok(/在水里会自动改成"直接游"/.test(index), 'mc_move 描述里写明"在水里自动直接游"')
   ok(/在水里（氧气/.test(index), 'mc_status 瘦身视图里带氧气')
   ok(/头在水下/.test(index), 'mc_status 读不到氧气时也说清"头在水下"')
