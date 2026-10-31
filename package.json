@@ -1,6 +1,6 @@
 {
   "name": "dsh-mc-agent",
-  "version": "0.6.74",
+  "version": "0.6.75",
   "description": "让 DSH 加入 Minecraft 服务器游玩：有自己的游戏角色，能探索、建造、聊天。",
   "keywords": [
     "dsh",

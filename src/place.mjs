@@ -101,6 +101,21 @@ export function placeRef (self, pos) {
  * 现在一律先看**世界**：目标格真的变成期望方块 ⇒ `appeared`（回包慢也算成功）；
  * 拿到明确拒绝 ⇒ `refused`；到点还没有 ⇒ `pending`（说清等了多久、那格当前是什么）。
  */
+/* 🔴 2026-11-05 用户：「allowtower 搭路有时候搭不上，还会搭了之后会自己挖掉」。
+ *   “自己挖掉”查清了：垫柱把我们刚放的那格踩在脚下，接着脱困阶梯的 `descend` →
+ *   `dropThrough` 就选“脚下这一格”往下挖（它把“柱子内部”也当合法落点，注释写着
+ *   “一次下 1 格，多叫几次就能下去”）⇒ 刚垫的方块被自己挖掉、人掉回去、白垫一趟。
+ *   所以放置成功时把这一格记一笔，movement 那边三十秒内谁都不许挖（`isOwnPlaced`）。 */
+export const OWN_PLACED_MS = 30_000
+export function noteOwnPlaced (b, pos) {
+  try {
+    if (!b || !pos) return
+    const m = (b.__mcPlaced ??= new Map())
+    m.set(`${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`, Date.now())
+    if (m.size > 64) for (const [k, t] of m) if (Date.now() - t > OWN_PLACED_MS) m.delete(k)
+  } catch { /* 记账失败不影响放置 */ }
+}
+
 export async function confirmPlaced (b, target, { name = null, before = null, waitMs = 1_200, stepMs = 100 } = {}) {
   const t0 = Date.now()
   /* 🔴 2026-11-02 审计（#2）：火把贴墙变 `wall_torch`、灵魂火把变 `soul_wall_torch` —— 期望名是
@@ -271,13 +286,13 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
         /* 回包成功也要复核：回包说放了、世界没变 = 幽灵方块，不能算成功。 */
         const c = await confirmPlaced(b, target, { name: want, before, waitMs: 600 })
         try { b.__placeConfirm = c } catch { /* 记账失败不影响结果 */ }
-        if (c.state === 'appeared') return true
+        if (c.state === 'appeared') { noteOwnPlaced(b, target); return true }
         lastErr = new Error(`回包说放上了，但 ${target?.x},${target?.y},${target?.z} 还是 ${c.got ?? '空'}`)
       } catch (e) {
         /* 🔴 用户 2026-10-29：没回包 ≠ 没放上。先看世界再判。 */
         const c = await confirmPlaced(b, target, { name: want, before, waitMs: 900 })
         try { b.__placeConfirm = c } catch { /* 同上 */ }
-        if (c.state === 'appeared') return true
+        if (c.state === 'appeared') { noteOwnPlaced(b, target); return true }
         if (isPlaceRefused(e)) {
           try { b.__placeConfirm = { ...c, state: 'refused' } } catch { /* 同上 */ }
           /* 明确拒绝也**继续重试**剩下的次数（服务端有时是“这一瞬”拒），

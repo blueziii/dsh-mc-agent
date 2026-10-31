@@ -258,5 +258,36 @@ section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做
 ok(/RESUMABLE_RESETS = new Set\(\[[^\]]*'goal_updated'/.test(
   readFileSync(join(VN, 'mineflayer-pathfinder', 'index.js'), 'utf8')),
   '★ vendor：goal_updated 也算“可恢复的重置”（setGoal 无条件 resetPath，不能因此判路线作废）')
+
+/* 2026-11-05 实机（用户：「垫脚下的时间不对，提前或者滞后」）：
+ *   垫柱原来只要“比要站的那格高 1 格以上”（= 刚离地 0.05 格）就往脚下放，
+ *   包到服务端时人已经落回原高度 ⇒ 方块与自己的碰撞箱重叠 ⇒ place_error / 踩空掉下去。
+ *   现在改成“这一跳的最高点附近”才放：那时竖直速度≈0，落回地面还有半秒。 */
+{
+  const idxSrc2 = readFileSync(join(VN, 'mineflayer-pathfinder', 'index.js'), 'utf8')
+  ok(/const riseBest = placingBestY - yGround/.test(idxSrc2), '垫柱：先算这一跳最高点相对地面的抬升')
+  /* 🔴 2026-11-05 用户：「allowdig 和 allowtower 一直搭方块，一直没搭上，一直在跳」——
+   *   “顶点 ±0.08 格才放”窗口太窄（0.08 格 ≈ 一个 tick 的位移），一错位就永远等不到
+   *   ⇒ place_jump_timeout ⇒ resetPath ⇒ 再跳。改成“离地够高就放”。 */
+  ok(/const riseMin = Number\(bot\.pathfinder\.placeMinRise/.test(idxSrc2), '★ 垫柱门槛走 placeMinRise')
+  ok(/canPlace = riseBest >= riseMin && riseNow >= riseMin/.test(idxSrc2),
+    '★ 垫柱离地够高就放（不再要求正好在顶点）')
+
+  /* 🔴 2026-11-05 用户：「挖完方块后会等几秒再垫」「等的时候还会一直跳」。
+   *   人跳不起来时 vendor 只会每 tick 按 jump 并硬等到 placeJumpTimeout（陆上 1.5s / 水里 6s）。
+   *   现在多一条：起跳 600ms 内没升过 placeNeedRise(0.25) ⇒ 立刻松手换招。 */
+  ok(/resetPath\('place_no_rise'\)/.test(idxSrc2), '跳不起来（600ms 内没升过 0.25 格）就不许一直按着 jump')
+  ok(/performance\.now\(\) - placingStartedAt > 600/.test(idxSrc2), '用 600ms 窗口判“跳不起来”')
+  ok(/Number\(bot\.pathfinder\.placeNeedRise \?\? 0\.25\)/.test(idxSrc2), 'placeNeedRise 可配，默认 0.25')
+  ok(/bot\.setControlState\('jump', false\)\s*\r?\n\s*resetPath\('place_no_rise'\)/.test(idxSrc2),
+    '先松开 jump 再 resetPath（换招时别把手一直按在跳上）')
+  ok(/let placingMarkY = 0/.test(idxSrc2) && /if \(yNow > placingMarkY \+ 0\.15\)/.test(idxSrc2),
+    '限时重计时改用 placingMarkY（placingBestY 现在每 tick 刷新，不能兼作进步标记）')
+}
+section('垫柱：够高就放（不是顶点才放）')
+const vIdxWhy = readFileSync(join(VN, 'mineflayer-pathfinder', 'index.js'), 'utf8')
+ok(/const riseMin = Number\(bot\.pathfinder\.placeMinRise/.test(vIdxWhy), '★ 用 placeMinRise 当门槛')
+ok(/canPlace = riseBest >= riseMin && riseNow >= riseMin/.test(vIdxWhy), '★ 离地够高就放')
+ok(!vIdxWhy.includes('yNowP >= placingBestY - 0.08'), '★ 不再要求“顶点 ±0.08”（窗口太窄会一直等不到）')
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败项'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

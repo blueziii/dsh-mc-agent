@@ -24,7 +24,7 @@ const SENSE_KEYS = ['around', 'entities', 'nearby', 'foes', 'foesNear', 'dropsWh
 const DIAG_KEYS = [
   'blockedAhead', 'planStep', 'planTried', 'resetReasons', 'pathResets', 'dugBlocks',
   'pillaredWith', 'digStalled', 'thrash', 'escapes', 'swimShift', 'stuckAt', 'blockedBy',
-  'stepUp', 'carveTries', 'doorTries', 'pathLenPlanned',
+  'stepUp', 'carveTries', 'doorTries', 'pathLenPlanned', 'pathResetSeen', 'ctrlAudit',
 ]
 
 /** 多行文本折叠：首行 + 坏消息行，最多 `maxLines` 行。 */

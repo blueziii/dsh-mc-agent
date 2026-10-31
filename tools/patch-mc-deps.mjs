@@ -93,7 +93,7 @@ rep(
 
 rep(
   '  let placingBlock = null\n  let lastNodeTime = performance.now()',
-  '  let placingBlock = null\n  let placingStartedAt = 0\n  let placingBestY = 0\n  let digStartedAt = 0\n  let lastNodeTime = performance.now()',
+  '  let placingBlock = null\n  let placingStartedAt = 0\n  let placingBestY = 0\n  let placingMarkY = 0\n  let digStartedAt = 0\n  let lastNodeTime = performance.now()',
   '计时变量：placingStartedAt / digStartedAt'
 )
 
@@ -128,6 +128,7 @@ rep(
         placing = true
         placingStartedAt = performance.now()
         placingBestY = bot.entity.position.y
+        placingMarkY = bot.entity.position.y
         placingBlock = nextPoint.toPlace.shift()
         placingEquipped = false
         fullStop()
@@ -149,8 +150,37 @@ rep(
          * 卡住检测永远轮不到它。实机现象：「正在垫方块往上爬，悬空超过 3 秒才掉下来」。
          * 现在：达不到高度只按有限的时间（bot.pathfinder.placeJumpTimeout，默认 1500ms），
          * 到点就松开 jump 并 resetPath，让外层照常重算 / 换招。 */
-        canPlace = placingBlock.y + 1 < bot.entity.position.y
+        /* 🔴 2026-11-05 实机（用户：「垫脚下的时间不对，提前或者滞后」）：
+         *   原来只要求「比要站的那格高 1 格以上」—— 也就是**刚离地 0.05 格**就算够。
+         *   可 placeBlock 要发包、服务端还要校验，包到的时候人往往已经落回原高度，
+         *   方块与自己的碰撞箱重叠 ⇒ 服务端拒绝（place_error）；偶尔放上了，人也已经踩空掉下去。
+         *   正确时机是**这一跳的最高点附近**：那时竖直速度≈0，落回地面还有半秒，包一定送得到。
+         *   两个条件一起判：① 这一跳最高点比地面高够 placeMinRise（默认 0.55，太低那一跳本身没意义）；
+         *   ② 当前位置已经到顶（不再上升）。 */
+        const yGround = Number(placingBlock.y) + 1
+        const yNowP = bot.entity.position.y
+        if (yNowP > placingBestY) placingBestY = yNowP
+        const riseBest = placingBestY - yGround
+        /* 🔴 2026-11-05 用户：「allowdig 和 allowtower 一直搭方块，一直没搭上，一直在跳」。
+     *   上一版要求“这一跳的最高点 ±0.08 格内才放” —— 窗口太窄（0.08 格 ≈ 一个 tick 的位移），
+     *   tick 或回包一错位就永远等不到 ⇒ 1.5 秒 place_jump_timeout ⇒ resetPath ⇒ 再跳，无限循环。
+     *   正确判据是「**够高就放**」而不是「正好在顶点放」：只要当前离地 ≥ riseMin（默认 0.55 格），
+     *   落回地面至少还有 0.3 秒，包一定送得到；同时用 riseBest 保证这一跳本身够高（不是被压着弹了一下）。 */
+    const riseMin = Number(bot.pathfinder.placeMinRise ?? 0.55)
+    const riseNow = yNowP - yGround
+    canPlace = riseBest >= riseMin && riseNow >= riseMin
         if (!canPlace) {
+        /* 🔴 2026-11-05 实机（用户：「挖完方块后会等几秒再垫」「等的时候还会一直跳」）：
+         *   跳不起来时（头顶刚挖开、服务端还没确认 / 站在一格高的洞里 / 水里上浮太慢），
+         *   riseBest 一直 ≈ 0 ⇒ 下面那套时限只是「等」，期间每 tick 都按着 jump。
+         *   加一条硬判据：起跳 600ms 内一次都没升过 placeNeedRise（默认 0.25）⇒ 跳不起来，
+         *   立刻松手换招（外层会改成挖台阶），不要傻等到 placeJumpTimeout。 */
+        if (performance.now() - placingStartedAt > 600
+            && (placingBestY - yGround) < Number(bot.pathfinder.placeNeedRise ?? 0.25)) {
+          bot.setControlState('jump', false)
+          resetPath('place_no_rise')
+          return
+        }
           /* 🔴 2026-10-25 DSH 补丁（用户：「水里搭不了方块的原因是上浮比普通跳跃慢」）：
            *   水里按住 jump 的上浮速度只有 ~0.6 格/秒（陆上起跳是瞬间 1.25 格），
            *   1500ms 根本升不到放置高度 ⇒ 每次都被判超时，水下垫柱子/搭桥永远失败。
@@ -159,8 +189,10 @@ rep(
            *   别把“慢慢在上升”当成“卡住了”。
            */
           const yNow = bot.entity.position.y
-          if (yNow > placingBestY + 0.15) {
-            placingBestY = yNow
+          /* “还在往上走”改看 placingMarkY —— 因为 placingBestY 现在每 tick 都刷新（要用来判顶点），
+           * 拿它当“上次明显进步的位置”就永远不成立，水里的 6 秒放宽会退化成 1.5 秒。 */
+          if (yNow > placingMarkY + 0.15) {
+            placingMarkY = yNow
             placingStartedAt = performance.now()
           }
           const isW = (nm) => /^(water|flowing_water|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/.test(String(nm ?? ""))

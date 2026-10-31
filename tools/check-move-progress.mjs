@@ -582,8 +582,15 @@ ok(/let attempt = planFrom[\s\S]{0,800}?for \(;;\)/.test(src), '有重试循环�
   ok(/if \(e\?\.mcStuck\)[\s\S]{0,1400}?attempt\+\+[\s\S]{0,200}?continue/.test(src), '采样器判卡 ⇒ 补救没戏就进下一轮脱困')
   ok(/await carveStepAhead\(b, target, \{ ignoreRange: true, only: obstacle \}\)/.test(src) && /carveTries < MOVE_CARVE_TRIES/.test(src),
     '🔴 阶梯之前先试"挖开挡路的台阶"（2026-10-18 实机；审计后改成看眼前障碍）')
-  ok(/if \(obstacle\) \{/.test(src) && !/carveTries === 0/.test(src),
+  ok(/if \(obstacle && !goalStraightUpOf\(b, target, noTower === false\)\) \{/.test(src) && !/carveTries === 0/.test(src),
     '🔴 2026-10-24 审计：没有明确障碍证据就不许挖（旧的 carveTries===0 无条件补挖已删）')
+  /* 🔴 2026-11-05 用户：「allowdig 和 allowtower 还会乱挖」「单独 allowdig 是正常的」——
+   *   目标就在正上方时横向补挖帮不上上升，只会把路过的地方挖烂；但这条**只在 allowTower
+   *   也开着时**生效，单独 allowdig 的输出与行为一个字都不动。 */
+  ok(/export function goalStraightUpOf \(b, target, allowTower\) \{/.test(src)
+    && /if \(allowTower !== true\) return false/.test(src)
+    && /dyS >= 3 && hzS <= 3/.test(src),
+    '★ 目标正上方（dy≥3、水平≤3）时不做横向补挖 —— 仅限 allowTower 同时开着')
   ok(/only: obstacle/.test(src) && /if \(only\) \{/.test(src),
     '🔴 2026-10-24 审计：补挖直接挖 obstacle 指出的那一格，不再自己重扫')
   ok(/const carveAllowed = allowDig === true && ctx\.cfg\?\.walkCanDig !== false && ctx\.cfg\?\.walkCarveStep !== false/.test(src),
@@ -618,7 +625,12 @@ ok(/let attempt = planFrom[\s\S]{0,800}?for \(;;\)/.test(src), '有重试循环�
   ok(/if \(resetsOf && resetLimit > 0 && resetsNow\(\) >= resetLimit\)/.test(src), '🔴 失效够多就直接进阶梯')
   ok(/if \(e\?\.mcPathThrash\) pathThrash\+\+/.test(src), 'catch 里数"因失效而脱困"的次数')
   ok(/resetReasons\[k\] = \(resetReasons\[k\] \?\? 0\) \+ 1/.test(src), '按理由（stuck / block_updated / …）分类计数')
-  ok(/const onReset = \(reason\) => \{[\s\S]{0,120}?pathResets\+\+/.test(src), 'onReset 里真的在数')
+  /* 窗口放宽到 400：onReset 里现在先记 resetSeen（每一种原因都数），pathResets++ 被推后了。
+   * 钉的是“onReset 里确实在数”这件事，不是“第几个字符”。 */
+  ok(/const onReset = \(reason\) => \{[\s\S]{0,400}?pathResets\+\+/.test(src), 'onReset 里真的在数')
+  ok(/resetSeen\[k\] = \(resetSeen\[k\] \?\? 0\) \+ 1/.test(src), '🔴 每一种重置原因都数（含良性）—— 失败时才能说清是谁在重置')
+  ok(/pathResetSeen: \{ \.\.\.resetSeen \}/.test(src), '结果里透出 pathResetSeen（不用再猜 path-reset 是什么）')
+  ok(/未识别的重置原因/.test(src), '🔴 兜底文案带上原始原因（不再只写一句 path-reset）')
   ok(/REASON_TEXT\[k\] \?\? k/.test(src), '报出去的理由也翻成人话（不漏内部字符串）')
   // ── P1：到达判定分两轴 ──
   ok(/const vertBad = xz \? false : \(vert < -vertTol \|\| vert > vertTol\)/.test(src), '🔴 垂直窗口按意图给（near ±1.5 / stand ±0.6）；xz 目标没有 y，不讲垂直')
@@ -2616,7 +2628,17 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
     const seg = src.slice(i0, src.indexOf('export async function escapeMove', i0))
     const ij = seg.indexOf("setControlState('jump', true)")
     const iw = seg.indexOf("setControlState('forward', true)")
-    ok(ij > 0 && iw > ij, 'jump 在 forward 之前（不再同时按下）')
+    /* 🔴 2026-11-05 反了：以前钉的是「jump 在 forward 之前」（2026-10-24 的结论：同时按会撞上
+     *   台阶侧面）。但实机反复证明「先跳再前进」是从**静止**起跳 —— 行走速度才 0.22 格/tick，
+     *   跳跃升满 1 格只要 2 tick，水平只能挪 0.4 格 ⇒ 跨不过一格台阶，跳了也上不去
+     *   （用户：「stair 还是上不去 / 每次挖完换个地方挖」）。
+     *   现在的顺序是「先助跑（forward + sprint）→ 再起跳」，所以这里钉的是 forward 在前、
+     *   而且中间隔着 STEP_UP_RUNUP_MS 的助跑。 */
+    ok(ij > 0 && iw > 0 && iw < ij, 'forward 在 jump 之前（先助跑再起跳）')
+    ok(seg.includes('sleep(STEP_UP_RUNUP_MS)'), '助跑时长用 STEP_UP_RUNUP_MS')
+    ok(!seg.includes("setControlState('sprint', true)"), '起跳不 sprint（2026-11-05 实机：助跑只有 90ms，sprint 会先撞台阶侧面）')
+    ok(/const ok = up >= 0\.75\n/.test(seg) || /const ok = up >= 0\.75$/.test(seg.trim()) ||
+       /const ok = up >= 0\.75(?! &&)/.test(seg), '只认“真抬高了将近一格”，不再要求水平位移（窄井里横向几厘米就撞墙）')
   }
 }
 /* ── （2026-10-27）结果字段不许说谎：`stuck` / `moved` 的语义 ── */
@@ -2698,9 +2720,8 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
    * （以前只认 `emptyNoPath` ⇒ 这种情况一次都没试过，直接报"先走到同一层"）。 */
   ok(/let vertStuck = false/.test(mv2) && /if \(Math\.abs\(dyR\) > 1\.5 && horizR <= arriveUsed \+ 1\.0\) vertStuck = true/.test(mv2),
     '"到了但差层"会被识别成垂直方向没路（vertStuck）')
-  ok(/if \(\(emptyNoPath \|\| vertStuck\) && carveNoPathOk && downTries < MOVE_DOWN_TRIES/.test(mv2)
-    && /if \(\(emptyNoPath \|\| vertStuck \|\| upFirst\) && carveNoPathOk && upTries < MOVE_UP_TRIES/.test(mv2),
-    '识别到之后交给往下挖 / 往上挖（不再直接收工）')
+  ok(/if \(\(emptyNoPath \|\| vertStuck \|\| upFirst\) && riseMode === 'dig'/.test(mv2),
+    '识别到之后交给往上挖（只有这趟的上升方式是“挖”才动手，垫柱那趟不抢）')
   /* 🔴 2026-11-02 用户：「只用 allowDig 上地表，它会乱挖」—— 两条修法各钉一处。 */
   ok(/if \(digDirTax > 0\)/.test(plug2)
     && /m\.cost = \(Number\(m\.cost\) \|\| 0\) \+ digDirTax \* \(dyDir < 0 \? 5 : 2\)/.test(plug2)
@@ -2709,18 +2730,54 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
   ok(/digDirTax: allowDig === true \? Number\(self\.cfg\.walkDigSideTax \?\? 15\) : 0/.test(plug2)
     && D2.walkDigSideTax === 15,
     '方向税只在 allowDig 那趟生效，默认 15 步/份')
-  ok(/const upFirst = !upFirstDone && carveNoPathOk && Number\.isFinite\(dyUp0\)/.test(mv2)
-    && /dyUp0 >= 1\.5 && hUp0 <= 3 && downBudgetOk\(self\)/.test(mv2)
-    && /if \(upFirst\) upFirstDone = true/.test(mv2),
-    '目标在头顶且水平 ≤3 格时，allowDig 那趟先切一刀 climbUp 楼梯（只做一次）')
+  ok(/const upFirst = carveNoPathOk && riseMode === 'dig' && \(headBlockedNow \|\| !upFirstDone\)/.test(mv2),
+    '目标在头顶且水平 ≤3 格、这趟的上升方式是“挖”时先切一刀 climbUp（头顶不堵时只做一次）')
+  /* 🔴 2026-11-05 用户：「只用 allowdig，一开始头顶如果有方块的话会乱挖其他地方的方块，
+   *   挖掉头顶方块后就正常了」—— 头顶堵着时那一刀 climbUp 常常上不去，而它只做一次，
+   *   之后 A* 会给一条水平绕行的路，补挖就把水平那面墙挖了（“乱挖别处”）。
+   *   现在：**头顶（fy+2）被方块堵着就每一轮都先 climbUp**（第一步就是清头顶）。 */
+  ok(/const hb = b\.blockAt\(new Vec3\(Math\.floor\(pp\.x\), Math\.floor\(pp\.y\) \+ 2, Math\.floor\(pp\.z\)\)\)/.test(mv2)
+    && /const headBlockedNow = \(\(\) => \{/.test(mv2),
+    '★ 每轮现读头顶那一格（fy+2）判有没有被堵')
+  ok(/if \(upFirst\) upFirstDone = true/.test(mv2), '头顶通了之后退回“只做一次”的老行为')
+  /* 🔴 2026-11-05 用户：「allowtower 和 allowdig 同时开，会混着用，挖了几格又往脚下搭方块，
+   *   一会换一种反而上不去。要按 cost 定」。
+   *   规矩：开局按代价定一次（垫一层 placeCost vs 挖一层 3×digCost），整趟只用一种；
+   *   只有 A* 判 NoPath（= 垫不上去）才允许切到挖，且切过去不回头。 */
+  ok(/const towerAllowed = noTower === false/.test(mv2)
+    && /let riseMode = \(towerAllowed && carveNoPathOk && headOk\) \? 'mixed'/.test(mv2)
+    && /towerCostOne <= digCostLayer\) \? 'tower' : 'dig'/.test(mv2),
+    '★ 开局按“能做得到什么 + 清头顶要多久”选：头顶清得动 ⇒ mixed（挖头顶 + 垫脚下，最省）；'
+    + '否则按垫一层 vs 挖一层的价钱定 tower/dig')
+  ok(/const headOk = \(\(\) => \{/.test(mv2) && /Number\(blk\.hardness \?\? 0\) > 3/.test(mv2),
+    '头顶方块太硬（>3，如深板岩/黑曜石）就不走 mixed —— 挖它比垫一层还贵')
+  ok(/const switchRiseMode = \(why, force = false\) => \{/.test(mv2)
+    && /if \(riseSwitches >= 2\) return false/.test(mv2)
+    && /if \(riseMoved < 1 && !force\) return false/.test(mv2)
+    && /switchRiseMode\('垫不上去（A\* 判没路）', towerRetries >= 2\)/.test(mv2)
+    && /switchRiseMode\('挖了两次都没升上去'\)/.test(mv2),
+    '★ 只有“事件”才换上升方式（垫不上去 / 挖两次没升上去），且切换后要真推进过、一趟最多 2 次；'
+    + '垫柱那档一格没垫上去时允许“试两次就强制改挖”（riseMoved 恒为 0 否则永远切不了）')
+  ok(/if \(Number\.isFinite\(yUp0\) && Number\.isFinite\(yStartRise\) && yUp0 >= yStartRise \+ 1\) riseMoved = 1/.test(mv2),
+    '垫柱是 A\\* 干的 —— 用“比这趟开始高了多少”给 riseMoved 补账，否则永远不许换方式')
   ok(!/shaftUp/.test(mv2),
     '不搞"直井式"上升（挖开头顶那格后正上方没落脚点，跳起来只会掉回原格；往上必须造台阶）')
   ok(/const cu = await climbUp\(b, target, \{ allowDig: carveNoPathOk, ctx, maxLevels: MOVE_CLIMB_LEVELS \}\)/.test(mv2),
     '目标在头顶时走斜梯 climbUp（挖斜上两格 + 清自己头顶，跳上去落在相邻方块顶面）')
   ok(/let stable = 0/.test(mv2) && /if \(Math\.abs\(y2 - lastY\) < 0\.02\) \{ stable \+= 1; if \(stable >= 2\) break \}/.test(mv2),
     '跳完等"y 不再变"才挖下一层（取代固定 700ms，且不会挖到自己脚下）')
-  ok(/for \(let tryI = 0; tryI < 2 && !upOk; tryI\+\+\)/.test(mv2) && /if \(upOk\) \{ lifted = true; break \}/.test(mv2),
+  ok(/for \(let tryI = 0; tryI < 2 && !upOk; tryI\+\+\)/.test(mv2) && /if \(upOk\) \{/.test(mv2),
     '同一个方向给两次起跳机会（偶发跳不上去就再来一次，不直接换方向）')
+  /* 🔴 2026-11-05 用户：「只用 allowdig 也像 stair 那样会乱挖 —— 挖几下后换个方向挖台阶」。
+   *   原来 `for (const [sx, sz] of cand)` 在“跳不上去”时会继续试下一个方向 ⇒ 每换一次白挖 3 格。
+   *   规矩与 stair 一致：方向锁死；跳不上不换方向（那是时机/朝向问题，不是方向问题）。 */
+  ok(/if \(Array\.isArray\(memo\) && \(memo\[0\] \|\| memo\[1\]\)\)/.test(mv2)
+    && /cand\.unshift\(cand\.splice\(i, 1\)\[0\]\)/.test(mv2),
+    '★ 上一层成功的方向记在 __mcClimbDir，这一层优先用它')
+  ok(/b\.__mcClimbDir = \[sx, sz\]/.test(mv2), '成功了才记方向')
+  ok(/refused = \{ why: 'no-lift', dir: \[sx, sz\]/.test(mv2)
+    && /跳不上去 = 时机\/朝向问题，换个方向只会白挖 3 格/.test(mv2),
+    '★ 跳不上去就停（不再换下一个方向白挖 3 格）')
   ok(/takenBy: String\(self\._moveGenWho \?\? 'unknown'\)/.test(mv2) && /if \(o\.takenBy\) extra\.takenBy = String\(o\.takenBy\)/.test(mv2),
     '被打断时点名是谁领走的号（只报"被另一次移动接管"查不出人）')
   ok(/_moveGenWho = 'init'/.test(read('../src/core.mjs')) && /#beginMove \(who = null\) \{ if \(who\) this\._moveGenWho/.test(read('../src/core.mjs')),
@@ -3712,6 +3769,158 @@ ok(/emptyNoPath = noPathPending/.test(mvSrcX), 'emptyNoPath 继承上一轮的 N
     ok(/mv\.exclusionAreasStep = \[/.test(plug) && /return n \* 60/.test(plug),
       '每次重算都按当时的实体位置现算禁行区（不是只在规划那一刻看一眼）')
   }
+}
+
+/* ── climbUp 起跳前必须先转向 ───────────────────────────────────────────────
+ * 用户 2026-11-05：「每次挖 3 个方块，然后又挖其他地方三个，有时候会走上去」。
+ * 3 格 = 自己头顶 1 + 斜上两格 —— 就是 climbUp 的一层。跳不上去的原因不是挖，是**没转向**：
+ * `forward` 相对当前朝向，人还朝着上一条 A* 路的方向 ⇒ 朝斜后方撞墙 ⇒ 外层 continue 重算 ⇒
+ * A* 因世界变了换方向再挖 3 格。`stepUp` 早就有 lookAt，climbUp 漏了。 */
+{
+  const iClimb = mvSrcX.indexOf('export async function climbUp')
+  const iClimbEnd = mvSrcX.indexOf('\n/* ---', iClimb + 10)
+  const climbBody = iClimb >= 0 ? mvSrcX.slice(iClimb, iClimbEnd > 0 ? iClimbEnd : iClimb + 6000) : ''
+  ok(climbBody.length > 0, '能切出 climbUp 函数体')
+  ok(/await b\.lookAt\(new Vec3\(ax \+ 0\.5, yNow \+ 0\.2, az \+ 0\.5\), true\)/.test(climbBody),
+    'climbUp 起跳前先朝要落脚那格看（forward 是相对朝向的，不转身就朝斜后方走）')
+  ok(/await sleep\(STEP_UP_TURN_MS\)/.test(climbBody),
+    '转完等一个朝向包再按 forward（只等 0 毫秒等于没转）')
+  const iLook = climbBody.indexOf('await b.lookAt(')
+  const iFwd = climbBody.indexOf("setControlState('forward', true)")
+  ok(iLook > 0 && iFwd > iLook, '先转向再按 forward（顺序不能反）')
+}
+
+
+/* ── 控制键审计（2026-11-05）────────────────────────────────────────────────
+ * 实机：「dig stair 跳的时候没往前走，第二次跳还往后退了一点」。
+ * 三条互斥解释（起跳朝向 / back 与 forward 同时按 / path[0] 与当前同格）光看结果分不出，
+ * 所以把「谁在按哪个键」记下来。这里钉两件事：**只记录不改行为**、聚合真的算得对。 */
+{
+  const briefSrc2 = read('../src/brief.mjs')
+  const { startCtrlAudit } = await import('../src/ctrl-audit.mjs')
+  ok(typeof startCtrlAudit === 'function', 'ctrl-audit 模块导出 startCtrlAudit')
+
+  // ① 不改行为：原 setControlState 照常被调用
+  const seen = []
+  const fake = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    setControlState: (k, v) => { seen.push([k, v]) },
+    on: () => {},
+    removeListener: () => {}
+  }
+  const aud = startCtrlAudit(fake)
+  fake.setControlState('forward', true)
+  fake.setControlState('jump', true)
+  fake.setControlState('forward', false)
+  const out = aud.stop()
+  ok(seen.length === 3, '审计不改行为：原 setControlState 每次都被照常调用', `calls=${seen.length}`)
+  ok(out.byKey.forward && out.byKey.forward.on === 1, '按裸键名汇总：forward 按了 1 次（不分调用者）')
+  ok(out.keys.some((r) => r.key === 'forward') && out.keys.some((r) => r.key === 'jump'), '按调用者分组：forward 与 jump 各自留痕（看得出是谁按的）')
+  ok(aud.stop() === out, 'stop 幂等（重复调用返回同一份结果）')
+
+  // ② forward 与 back 同时按着要能被算出来（“人不动 / 往后退”的头号嫌疑）
+  const seen2 = []
+  const fake2 = {
+    entity: { position: { x: 0, y: 64, z: 0 } },
+    setControlState: (k, v) => { seen2.push([k, v]) },
+    on: () => {},
+    removeListener: () => {}
+  }
+  const aud2 = startCtrlAudit(fake2)
+  fake2.setControlState('forward', true)
+  fake2.setControlState('back', true)
+  await new Promise((r) => setTimeout(r, 30))
+  fake2.setControlState('back', false)
+  fake2.setControlState('forward', false)
+  const out2 = aud2.stop()
+  ok(out2.bothMs >= 20, '算得出 forward 与 back 同时按着的时长', `bothMs=${out2.bothMs}`)
+
+  // ③ 接线：走路主循环开了审计、结果里透出摘要、成功时被 brief 删掉
+  ok(/const ctrlAudit = startCtrlAudit\(b\)/.test(mvSrcX), 'walkPathfinder 里真的开了控制键审计')
+  ok(/ctrlAudit: ctrlAuditOf\(ctrlAudit\)/.test(mvSrcX), '结果里透出 ctrlAudit 摘要')
+  ok(/trail: Array\.isArray\(c\.trail\) \? c\.trail\.slice\(-6\) : \[\]/.test(mvSrcX), '只留最后 6 个位置采样（不刷屏）')
+  ok(/'ctrlAudit'/.test(briefSrc2), 'brief 把它当诊断量：成功时删、失败时留')
+}
+
+
+{
+  /* 🔴 2026-11-05 用户：「move 只用 allowdig 现在会挖头上方块了，但是还是会到处乱挖，
+   *   直到挖掉头顶那格后才正常」—— 头顶堵着时 A* 会先给水平绕行的路，一路撞墙补挖。
+   *   现在：目标在上方且头顶被堵 ⇒ **先清头顶再规划**（只挖自己正上方那两格）。 */
+  const mS = strip(read('../src/movement.mjs'))
+  /* 🔴 2026-11-05 实机炸过一次：`let riseMode = (towerAllowed && carveNoPathOk && headOk)`
+   *   读的 `carveNoPathOk` 声明在它下边 236 行 ⇒ TDZ（Cannot access before initialization）。
+   *   902 条断言全绿也抓不到，因为**没有一条真的执行 walkPathfinder**。这条顺序守门是止损：
+   *   凡是“某常量在 X 处声明、却在 X 之前被读”的写法，靠它兜住。 */
+  ok(mS.indexOf('const carveNoPathOk = allowDig === true') > 0 &&
+     mS.indexOf('const carveNoPathOk = allowDig === true') < mS.indexOf('let riseMode ='),
+    '★ carveNoPathOk 必须先于 riseMode 声明（否则 TDZ：Cannot access before initialization）')
+  /* 🔴 2026-11-05 用户：「allowdig 和 allowtower 一直搭方块，一直没搭上，一直在跳」——
+   *   垫柱失败（place_error / place_jump_timeout / place_no_rise）以前只进 resetSeen、不影响策略，
+   *   A* 重置一次就再来一次 ⇒ 原地无限跳。连着 MOVE_PLACE_FAIL_MAX 次必须换招或如实收工。 */
+  ok(/export const MOVE_PLACE_FAIL_MAX = 3/.test(mS), '★ 垫柱连败上限 3 次')
+  ok(/placeFailSeen\[k\] = \(placeFailSeen\[k\] \?\? 0\) \+ 1/.test(mS), '★ 三种垫柱失败都计数')
+  ok(/if \(placeFails >= MOVE_PLACE_FAIL_MAX && riseMode !== 'dig'\)/.test(mS), '★ 连败到上限就换招')
+}
+
+{
+  /* 🔴 2026-11-05 用户实机：「报了这个错，但是我看着它还在正常挖」——
+   *   挖了 12 格、升了 5 格，却被一句“走不动：时间用在挖方块上了”打发。
+   *   现在：有 carved/climbedUp 就不算 stuck，文案也说“还在挖、接着叫”。 */
+  const mH = strip(read('../src/movement.mjs'))
+  ok(/stuck: !\(Number\(b\?\.__mcCarved \?\? 0\) > 0 \|\| Number\(b\?\.__mcClimbed \?\? 0\) > 0\)/.test(mH),
+    '★ walk-hung 时按进度判 stuck（有进展就不算卡住）')
+  ok(!/stuck: true,\s*\n\s*reason: 'walk-hung'/.test(mH.replace(/\r\n/g, '\n')),
+    '不再把 walk-hung 写死成 stuck: true')
+  ok(/const cv = Number\(o\?\.carved \?\? 0\)/.test(mH) && /一直在往上挖/.test(mH),
+    '有进展时文案说“一直在往上挖”，而不是“走不动”')
+}
+
+{
+  /* 🔴 2026-11-05 用户：「两者一起开，一开始就挖台阶（乱挖）…中途垫一下…最后才用垫柱」——
+   *   A* 两条边同时可用时它会按单价自己混着挑，riseMode 只约束了我们自己的 climbUp。
+   *   现在：一次只给 A* 一种上升手段。 */
+  const mR = strip(read('../src/movement.mjs'))
+  ok(/const applyRiseMode = \(\) => \{/.test(mR), '★ 有 applyRiseMode：把 riseMode 落到 A* 身上')
+  ok(/if \(riseMode === 'tower' \|\| riseMode === 'mixed'\) \{\s*\n\s*mv\.allow1by1towers = true\s*\n\s*mv\.canDig = false/.test(mR.replace(/\r\n/g, '\n')),
+    '垫那侧（tower/mixed）：开 allow1by1towers、关掉 A* 的挖边（不然它按 4 分一格的价格一直挖）')
+  ok(/mv\.allow1by1towers = false\s*\n\s*mv\.canDig = carveNoPathOk/.test(mR.replace(/\r\n/g, '\n')),
+    '挖台阶档：关掉 A* 的垫边，挖边只按 allowDig 的许可开')
+  ok(/applyRiseMode\(\)      \/\/ 改完立刻落到 A\* 身上/.test(mR), '切换后立刻生效（下一次 goto 就换一侧）')
+  ok(/applyRiseMode\(\)   \/\/ 兜一次/.test(mR) && mR.indexOf('applyRiseMode()   // 兜一次') < mR.indexOf('b.pathfinder.goto(goal)'),
+    '每次 goto 前兜一次，保证 A* 拿到与 riseMode 一致的 movements')
+}
+
+{
+  /* 🔴 2026-11-05 用户：「我是说挖头上两格，再垫脚下两格的那种」+「会不会又乱挖，乱走」——
+   *   mixed = 先清头顶腾空间、再垫脚下，一层 2 块方块；限制：只动正上方两格、一趟上限、保护区不挖。 */
+  const mM = strip(read('../src/movement.mjs'))
+}
+/* 🔴 2026-11-05 用户：「单 allowdig 挖一段台阶后，会在最后格挖左后、上方一格的格子，上不去」。
+ *   规矩与 stair 一致：方向锁死，永不考虑正后方（挖开反方向那侧也爬不上去，只是白挖 3 格）。 */
+{
+  const srcC = strip(read('../src/movement.mjs'))
+  const i0 = srcC.indexOf('export async function climbUp')
+  const seg = i0 < 0 ? '' : srcC.slice(i0, srcC.indexOf('\nexport ', i0 + 10))
+  ok(seg.length > 0, 'climbUp 存在')
+  ok(seg.includes('const back0 = [-dx, -dz]'), '★ climbUp：目标有水平方向时排除正后方')
+  ok(seg.includes('const back0 = [-front[0], -front[1]]'), '★ climbUp：目标在正头顶时也排除正后方')
+  ok((seg.match(/d\[0\] === back0\[0\] && d\[1\] === back0\[1\]/g) || []).length >= 2,
+    '★ climbUp：两个分支都真的跳过正后方')
+  ok(seg.includes('const memo0 = b?.__mcClimbDir') && seg.includes('front = [memo0[0] || 0, memo0[1] || 0]'),
+    '★ climbUp：正头顶时沿用上一层成功的方向')
+}
+
+/* 🔴 2026-11-05 用户：「正常挖一段，然后就挖其他地方，只挖两格，都是挖的现在位置水平格子高一格」。
+ *   定性：这是「每轮 goto 前清自己头顶 fy+1 / fy+2 两格」那块（MOVE_HEAD_CLEAR_MAX = 6）——
+ *   位置正是“自己水平同格、脚底上一格”，而且**清头顶本身不产生上升**（只让出起跳空间），
+ *   于是挖两格没人上去、下一轮换个地方再挖两格。整块已删除；头顶空间只由 climbUp 自己清
+ *   （那是“挖斜上两格 + 清头顶 + 跳”一整套动作，有上升伴随）。 */
+{
+  const mH = strip(read('../src/movement.mjs'))
+  ok(!/MOVE_HEAD_CLEAR_MAX/.test(mH), '★ 不再有“每轮清头顶”那块（它挖自己头顶两格却不上升）')
+  ok(!/headClearOk/.test(mH), '★ 也不再靠 headClearOk 门控（整块已删）')
+  ok(/const overhead = at\(fx, fy \+ 2, fz\)/.test(mH), 'climbUp 仍会先清自己头顶那一格（有上升伴随）')
 }
 
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)

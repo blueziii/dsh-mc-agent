@@ -468,7 +468,7 @@ export async function digStair (self, {
   }
   /* 往上 / 往下都能挖：目标 y 比现在高就是上升阶梯 */
   const up = start.y < ty
-  const d = stairDirOf(b, { pos, dir })
+  let d = stairDirOf(b, { pos, dir })
   if (!d) throw new Error('算不出往哪挖：给 x/z（朝那个点挖）或 dir（"x+" / "x-" / "z+" / "z-"）。')
   if (up ? start.y >= ty : start.y <= ty) {
     return [`🪜 我已经在 y=${start.y}，目标 y=${ty} —— 不用挖了（换个目标 y 才有活干）。`]
@@ -482,10 +482,98 @@ export async function digStair (self, {
   const MAX = Math.min(Math.max(1, Math.floor(maxSteps)), 128)
   const blkAt = (x, y, z) => b.blockAt(new Vec3(x, y, z))
 
+  /* 🔴 2026-11-05 用户：「dig stair 现在周围有空气就不挖，应该找最近的墙往上挖」。
+   *   原来方向是固定的：正前方脚下是空的（矿洞/大洞）就判 `no-floor` 收工 ——
+   *   可人明明站在岩体里，左边右边后面都是墙。
+   *   现在往前挖不动时，先横着换一面墙继续（只排除“当前方向”和“正后方”，免得来回晃），
+   *   换满 3 次还找不到墙才如实报 no-floor。 */
+  /* 🔴 2026-11-05 用户：「不要自动换向，我要的是 ai 输入 x+，自动到靠近挖 x+ 的墙开始挖」。
+   *   方向由 `dir` 锁死：这个方向前面没台阶面，就**沿这个方向走过去**找墙，
+   *   绝不换面、也不绕到别的方向去挖（之前那套换面 + 四邻找墙被撤掉了）。 */
+  const WALL_SCAN_AHEAD = 8
+  /** 沿 dir 方向、WALL_SCAN_AHEAD 格以内，找一格“站上去、再往前一格就是能挖的墙”的位置。
+   *  只沿 dir 扫（用户 2026-11-05：「不要自动换向，自动到靠近挖 x+ 的墙开始挖」）。 */
+  /** 这一格能不能站人（脚位空 + 头顶空 + 脚下实心且不是液体）。
+   *  ⚠️ 不能直接 import `movement.mjs` 的 `canStandAtWorld` —— 两个模块互相 import 会成环
+   *  （2026-11-05 线上就是这样炸的：`Error: canStandAt is not defined`）。
+   *  这里用 mining 自己已有的 `blkAt`/`isAir`/`isPassable`/`isSolidBlock` 就地判。 */
+  const standOkAt = (x, yy, z) => {
+    const feet = blkAt(x, yy, z)
+    const head = blkAt(x, yy + 1, z)
+    const under = blkAt(x, yy - 1, z)
+    if (!feet || !head || !under) return false
+    const free = (q) => isAir(q.name) || isPassable(q.name)
+    return free(feet) && free(head) && isSolidBlock(under.name) && !isLiquid(under.name)
+  }
+  const findWallSpotAhead = (from, dir, isUp, maxR = WALL_SCAN_AHEAD) => {
+    for (let r = 1; r <= maxR; r++) {
+      const x = from.x + dir.x * r
+      const z = from.z + dir.z * r
+      if (!standOkAt(x, from.y, z)) continue
+      const nx = x + dir.x; const nz = z + dir.z
+      const footY = isUp ? from.y : from.y - 2
+      const f = blkAt(nx, footY, nz)
+      if (!f || f.boundingBox !== 'block' || isLiquid(f.name)) continue
+      const ys = isUp ? [from.y + 1, from.y + 2, from.y + 3] : [from.y - 1, from.y - 2, from.y - 3]
+      const col = ys.map((y) => blkAt(nx, y, nz))
+      if (col.some((q) => !q || isLiquid(q.name))) continue
+      if (!col.some((q) => !isAir(q.name) && canBreakNow(b, q))) continue
+      return { pos: { x, y: from.y, z }, r, dir }
+    }
+    return null
+  }
+  /* 🔴 2026-11-05 实机（用户：「stair 还是会后退」+ 上一版我加的「先跳一次」）：
+   *   `stepUp` 返回 ok 只代表“离地抬高了”—— 那一刻人还在空中（上升中或正要下落）。
+   *   直接 `floor()` 取坐标会把 `cur` 记成空中高度（例如人跳起来瞬间记成 y=46），
+   *   人随后落回 y=42 ⇒ 下一步的 `fy = cur.y + 1 = 47` 在头顶 5 格，跳不上去 ⇒ 反复失败；
+   *   日志里就是「⬇ 这一步没上去，反而从 y=46 掉到 y=42」和「越挖越往后」。
+   *   规矩：**取坐标前先等落地**（y 连续两次不变；最多等 maxMs）。 */
+  const settleGround = async (maxMs = 500) => {
+    const y0 = Number(b?.entity?.position?.y)
+    if (!Number.isFinite(y0)) return b.entity.position.floored()
+    const t = Date.now()
+    let last = y0
+    let still = 0
+    while (Date.now() - t < maxMs) {
+      await new Promise((r) => setTimeout(r, 50))
+      const y = Number(b?.entity?.position?.y)
+      if (!Number.isFinite(y)) break
+      if (Math.abs(y - last) < 0.02) { still++; if (still >= 2) break } else still = 0
+      last = y
+    }
+    return b.entity.position.floored()
+  }
+
   while (steps < MAX) {
+    /* 🔴 2026-11-05 用户：「不要自动换向，我要的是 ai 输入 x+，自动到靠近挖 x+ 的墙开始挖」。
+     *   前方没台阶面 / 没落点时：沿当前 dir 走过去找一面墙再继续挖，绝不换面。
+     *   找到了（走过去了）返回 true，调用方 `continue` 重来；找不到返回 false。 */
+    /* 🔴 2026-11-05：`dirNameOf` 原来定义在被删掉的 `pickStairDirAt` 里（那次删 39 行换向死代码时一起没了），
+     *   而 `huntAlongDir` 的日志还在用它 ⇒ 实机直接 `ReferenceError: dirNameOf is not defined`（第 4 次同类事故）。
+     *   这类错误 `node --check` 查不出来（它只查语法），只能靠守门断言钉住“用了就得有定义”。 */
+    const dirNameOf = (v) => (v.x > 0 ? 'x+' : v.x < 0 ? 'x-' : v.z > 0 ? 'z+' : 'z-')
+    const huntAlongDir = async (whyText, isUp) => {
+      if (budgetMs - (Date.now() - t0) < 3_000) return false
+      const spot = findWallSpotAhead(cur, d, isUp)
+      if (!spot) return false
+      const restH = budgetMs - (Date.now() - t0) - 1_500
+      if (restH < 1_000) return false
+      notes.push(`🧭 ${whyText} —— 沿 ${dirNameOf(d)} 走到 ${spot.pos.x},${spot.pos.y},${spot.pos.z}（${spot.r} 格外，那边朝 ${dirNameOf(d)} 有墙）再接着挖`)
+      try {
+        const w2 = await self.walkTo(
+          { x: spot.pos.x, y: spot.pos.y, z: spot.pos.z },
+          { allowDig: false, budget: Math.min(3_000, restH), intent: 'stand' },
+        )
+        if (w2?.arrived !== true) notes.push(`⚠ 没走到那格：${w2?.hint ?? w2?.reason ?? '没给原因'}`)
+      } catch (e) { notes.push(`⚠ 走过去抛错：${e?.message ?? e}`) }
+      cur = b.entity.position.floored()
+      return true
+    }
     /* 剩余时间不够走一步 ⇒ 直接收工成 budget（不再让 walkTo 越过预算边界后误判 stuck） */
     if (budgetMs - (Date.now() - t0) < STAIR_MIN_STEP_MS) { reason = 'budget'; break }
     if (up ? cur.y >= ty : cur.y <= ty) { reason = 'done'; break }
+    /* 本步起点：跳失败时人会朝后弹开一格，不能拿被弹开的坐标当新起点（否则下一步目标也跟着后退）。 */
+    const cur0 = { x: cur.x, y: cur.y, z: cur.z }
     const fx = cur.x + d.x; const fz = cur.z + d.z
     /* 往上 / 往下各一步；脚下 (fy-1) 必须是实心（台阶面），不能踩空 */
     const fy = up ? cur.y + 1 : cur.y - 1
@@ -500,10 +588,29 @@ export async function digStair (self, {
     if (isLiquid(floor.name)) { reason = 'liquid'; break }
     /* 前方脚下是空的（矿洞）：不当场放弃 —— 挖完前面那几格再量落差，
      * 能下去就下去（`stairDropOf`），落差太大或底下有液体才停。 */
+    /* 往下挖时前方脚下是空的：先看能不能安全落下去（stairDropOf），落不了就换一面墙。 */
+    if (!up && isAir(floor.name)) {
+      const dr0 = stairDropOf(blkAt, fx, fy, fz)
+      if (!dr0) {
+        if (await huntAlongDir(`前方 ${fx},${fy},${fz} 那边是空的（下去没有落点）`, false)) continue
+        reason = 'no-wall'
+        notes.push(`⛔ 沿 ${dirNameOf(d)} 往前 ${WALL_SCAN_AHEAD} 格都没有能往下挖的落点 —— 换一个 dir，或先用 mc_move 走到岩壁边上`)
+        break
+      }
+    }
     const hollowAhead = !up && isAir(floor.name)
-    /* 往上挖时前方脚下空着是"没台阶面"，不能套用往下掉那套 —— 照旧停，别把上升挖成坠落。 */
-    if (up && isAir(floor.name)) { reason = 'no-floor'; break }
-
+    /* 往上挖时前方脚下空着是"没台阶面"，不能套用往下掉那套。
+     * 但别当场收工 —— 先横着找一面墙继续往上挖（用户 2026-11-05：「应该找最近的墙往上挖」）。 */
+    /* 往上挖时前方脚下空着是"没台阶面"，不能套用往下掉那套。
+     * 🔴 2026-11-05 用户：「不要自动换向，我要的是 ai 输入 x+，自动到靠近挖 x+ 的墙开始挖」
+     *    ⇒ 方向由 `dir` 锁死：前方没台阶面就**沿这个方向走过去**找墙，
+     *      不换面、也不绕到别的方向的墙上去（之前那套换面 + 四邻找墙已撤掉）。 */
+    if (up && isAir(floor.name)) {
+      if (await huntAlongDir(`前方 ${fx},${fy},${fz} 没有台阶面（踩不住）`, true)) continue
+      reason = 'no-wall'
+      notes.push(`⛔ 沿 ${dirNameOf(d)} 往前 ${WALL_SCAN_AHEAD} 格都没有能往上挖的墙 —— 换一个 dir，或先用 mc_move 走到岩壁边上`)
+      break
+    }
     /* 🔴 2026-10-26 实机（用户：「dig stair 往上挖还是只挖两格会被卡住」）：
      *   往上挖时只清了**前方**那 3 格，漏了"我自己得跳上去"这件事 —— 跳跃需要
      *   **自己站位上方 2 格净空**（脚从 y 抬到 y+1.25、头顶到 y+3）。从水平隧道往上挖时，
@@ -552,8 +659,50 @@ export async function digStair (self, {
     }
     const stepBudget = nbStep.budgetMs
 
+    /* 🔴 2026-11-05 实机（用户：「stair 还是不去刚挖那格」「还是要跳两下才上去」）：
+     *   阶梯的每一步都是“斜上一格”，而 vendor 的 A* 只生成**四方向**的 JumpUp 边
+     *   （`getMoveJumpUp` 没有斜向），横向那格又正是刚挖出来的台阶本体 ⇒ A* 一律给 noPath
+     *   ⇒ 每步先白花 1.5~3 秒等 walkTo 失败，才轮到 stepUp 兜底；而 stepUp 的返回值当时
+     *   没人看（失败也不说为什么），日志里只剩下“一步都没走动”。
+     *   现在：先 bit 直接跳（stepUp 约 0.6 秒，比 A* 便宜），成功就走下一步；
+     *   不行再让 A* 试，再不行最后再跳两次（用户实测第二下常常就上去了）。 */
+    let hopWhy = null
+    let hopped = false
+    {
+      const mv0 = await import('./movement.mjs').catch(() => null)
+      if (mv0?.stepUp) {
+        try {
+          const su0 = await mv0.stepUp(b, new Vec3(fx, standY, fz), { allowDig: false })
+          hopped = su0?.ok === true
+          if (!hopped) hopWhy = su0?.why ?? null
+        } catch (e) { hopWhy = String(e?.message ?? e) }
+      }
+    }
+    if (hopped) {
+      /* 刚跳起来时人在空中：必须等落地再取，否则 cur 记成空中高度（见 settleGround 注释） */
+      const nowH = await settleGround(b, 700)
+      const stoodH = up ? nowH.y >= standY : nowH.y <= standY
+      /* 🔴 2026-11-05：高度对了还不够 —— 跳上**旁边**一格也算 `stoodH`，那正是“挖着挖着换位置”的来源
+       *   （梯子越挖越歪）。必须真落在目标那一格（水平 ≤0.9 格）才算这一步成了。 */
+      const stayedHere = Math.hypot(nowH.x - fx, nowH.z - fz) <= 0.9
+      if (stoodH && stayedHere) {
+        steps++
+        if (up && nowH.y < cur.y) notes.push(`⬇ 这一步没上去，反而从 y=${cur.y} 掉到 y=${nowH.y}`)
+        cur = nowH
+        continue
+      }
+      if (stoodH && !stayedHere) {
+        notes.push(`↪ 跳上去了但没落到 ${fx},${standY},${fz}（现站在 ${nowH.x},${nowH.y},${nowH.z}）—— 不算这一步`)
+      }
+    }
+
+    /* 🔴 2026-11-05 实机（用户：「跳不上去，而且还是会后退」）：
+     *   每步的目标是“斜上一格”，而 vendor 的 A* 只生成**四方向** JumpUp 边，斜上永远 noPath
+     *   ⇒ 它转而算“绕过去”的路，那条路常常先往回走 / 绕圈 —— 用户看到的就是「后退」。
+     *   所以：需要抬升的这一步**只跳，不问 A***（同层或往下才走 walkTo）。 */
+    const needRise = up && standY > fy
     let w = null
-    try {
+    if (!needRise) try {
       /* 🔴 2026-10-28 参数审计：这里原来写 `budgetMs:` —— `walkTo` 只认 `budget`，
        *    多出来的键被静默丢掉，于是每步走路都用上了 `cfg.moveBudgetMs` 兜底值（40 秒），
        *    一步就把整个 dig 调用的时间吃光，回来只会报"时间到/卡住"。 */
@@ -562,9 +711,16 @@ export async function digStair (self, {
       notes.push(`⚠ 走过去失败：${e?.message ?? e}`)
     }
     steps++
-    let now = b.entity.position.floored()
-    let ok = w?.arrived || (now.x === fx && now.z === fz && Math.abs(now.y - standY) <= 1)
-    if (!ok && budgetMs - (Date.now() - t0) >= STAIR_MIN_STEP_MS) {
+    let now = await settleGround(b, 400)
+    /* 🔴 2026-11-05 实机（用户：「现在完全反着走了」）：原来这里写 `Math.abs(now.y - standY) <= 1`
+     *   —— 往上挖时 standY = cur.y + 1，人**没上去、还在 cur.y** 也满足 |差| = 1 ⇒ ok = true
+     *   ⇒ 报"推进 1 格"、`cur` 停在原地、下一轮再挖同一格。而且 `w.arrived` 也可能因为
+     *   walkTo 自己的 arrive 容差给出同样的假成功。
+     *   往上必须真到高度（now.y >= standY），往下必须真降到（now.y <= standY）。 */
+    const stoodOk = () => (up ? now.y >= standY : now.y <= standY)
+    /* needRise 的那一步没有 w（没问 A*），卡住文案里的“寻路说 …”要跳过 */
+    let ok = !needRise && (w?.arrived || (now.x === fx && now.z === fz)) && stoodOk()
+    if (!ok && !needRise && budgetMs - (Date.now() - t0) >= STAIR_MIN_STEP_MS) {
       /* 🔴 一次没上去就**再试一次**，别一步就判死。两个原因：
        *   ① movement 的上台阶动作是"先单独起跳、再叠 forward"（STEP_UP_JUMP_MS），
        *      窄井里第一次常常差一点；
@@ -572,12 +728,40 @@ export async function digStair (self, {
        * 以前这里一次失败直接 `stuck` + break —— 用户看到的就是"卡住"。 */
       try {
         const w2 = await self.walkTo({ x: fx, y: standY, z: fz }, { allowDig: false, budget: stepBudget, intent: 'stand' })
-        now = b.entity.position.floored()
-        ok = w2?.arrived || (now.x === fx && now.z === fz && Math.abs(now.y - standY) <= 1)
+        now = await settleGround(b, 400)
+        ok = (w2?.arrived || (now.x === fx && now.z === fz)) && stoodOk()
       } catch (e) { notes.push(`⚠ 再走一次也没成：${e?.message ?? e}`) }
     }
-    cur = now
+    /* 位置轨迹：往上挖却往下掉是实机反馈里最费解的一种（用户 2026-11-05「完全反着走了」），
+     * 只在不升反降时记一行，正常推进时不占输出。 */
+    if (up && now.y < cur.y) notes.push(`⬇ 这一步没上去，反而从 y=${cur.y} 掉到 y=${now.y}`)
+    /* 🔴 2026-11-05（用户：「stair 为什么一直会后退」）：原来是 `cur = now` —— 每一步失败都把进度锚点
+     *   改写成“人的真实位置”。锚点一退，下一步的目标格就跟着退 ⇒ 越挖越往回走（正反馈）。
+     *   现在：**锚点只前进**（只有真成功才更新），失败一律不动。 */
+    if (ok) cur = now
     if (!ok) {
+      /* 🔴 2026-11-05 实机（用户：「如果 dig stair 没跳上去会后退」「dig stair 现在挖着挖着会换位置挖」）：
+       *   跳失败最常见的副作用是人被顶开一两格。这里试过“先走回原位再试同一格”，但**实机证明这更糟**：
+       *   走回去那步本身也会失败（正是同一个跳不上去的原因），而代码不看走没走到就把 `cur` 改回原点
+       *   ⇒ 于是“目标格按 A 算、人却站在 2 格外的 B”，之后每次 stepUp 都在跳一个够不着的格子，
+       *   日志里就是「↪ 前方脚下是空的 → 换一面墙 → 又换回来」「跳上去三次都没成（no-step / wall）」。
+       *   现在的规矩：**`cur` 永远取人的真实位置**；走回原位只是“试着把位置摆正”，成败都无所谓。 */
+      const off = Math.hypot(now.x - cur0.x, now.z - cur0.z)
+      const restB = budgetMs - (Date.now() - t0)
+      if (off >= 0.6 && restB > 2_500) {
+        notes.push(`↩ 没跳上去还被顶开了 ${off.toFixed(1)} 格（${now.x},${now.y},${now.z}）—— 试走回 ${cur0.x},${cur0.y},${cur0.z}`)
+        let backOk = false
+        try {
+          const bck = await self.walkTo({ x: cur0.x, y: cur0.y, z: cur0.z }, { allowDig: false, budget: Math.min(2_000, restB - 1_000), intent: 'stand' })
+          backOk = bck?.arrived === true
+        } catch (e) { notes.push(`⚠ 走回原位那步抛错：${e?.message ?? e}`) }
+        const real = await settleGround(b, 300)
+        if (backOk) notes.push(`↩ 已经走回 ${real.x},${real.y},${real.z}`)
+        else notes.push(`⚠ 没走回原位（现站在 ${real.x},${real.y},${real.z}）—— 下一步仍然按原锚点算，不跟着退`)
+        /* 🔴 2026-11-05：这里原来 `cur = real`（以及 else 分支 `cur = b.entity.position.floored()`）——
+         *   正是“一直后退”的直接来源。回不去原位时，把锚点改成人的实际位置只会让目标一步步往后挪。
+         *   `cur` 保持不动：这一步没成就是没成，下一轮还打同一格。 */
+      }
       /* 🔴 时间到被砍断 ≠ 卡住。剩余时间不够再走一步时如实报 budget；
        *   说成"卡住"会让模型去 mc_observe / 换方向，把本来接着叫一次就能挖完的活丢掉。 */
       if (budgetMs - (Date.now() - t0) < STAIR_MIN_STEP_MS) { reason = 'budget'; break }
@@ -587,11 +771,14 @@ export async function digStair (self, {
        *   动态 import：避免 mining ↔ movement 的静态循环依赖。 */
       try {
         const mv = await import('./movement.mjs')
-        await mv.stepUp(b, new Vec3(fx, standY, fz), { allowDig: false })
-      } catch (e) { notes.push(`⚠ 硬跳也没成：${e?.message ?? e}`) }
-      now = b.entity.position.floored()
-      cur = now
-      if (now.x === fx && now.z === fz && Math.abs(now.y - standY) <= 1) continue
+        for (let k2 = 0; k2 < 2; k2++) {
+          const su = await mv.stepUp(b, new Vec3(fx, standY, fz), { allowDig: false })
+          if (su?.ok) break
+          hopWhy = su?.why ?? hopWhy
+        }
+      } catch (e) { hopWhy = String(e?.message ?? e) }
+      now = await settleGround(b, 400)
+      if (now.x === fx && now.z === fz && stoodOk()) { cur = now; continue }
       /* 已经到目标高度了就别报卡住：`y` 到了就算这一趟干完了（用户 2026-10-29：「它挖到地表了，然后就报了」） */
       if (up ? now.y >= ty : now.y <= ty) { reason = 'done'; break }
       reason = 'stuck'
@@ -603,7 +790,7 @@ export async function digStair (self, {
       const myHead1 = blkAt(cur.x, cur.y + 1, cur.z)?.name ?? '空气'
       const myHead2 = blkAt(cur.x, cur.y + 2, cur.z)?.name ?? '空气'
       const wWhy = w?.reason ?? w?.why ?? null
-      notes.push(`⛔ 卡在 ${cur.x},${cur.y},${cur.z}：要去的 ${fx},${standY},${fz} 脚位是 ${atName}、头顶是 ${headName}、脚下是 ${floorName}；自己头顶是 ${myHead1}/${myHead2}${wWhy ? `；寻路说 ${wWhy}` : ''}`)
+      notes.push(`⛔ 卡在 ${cur.x},${cur.y},${cur.z}：要去的 ${fx},${standY},${fz} 脚位是 ${atName}、头顶是 ${headName}、脚下是 ${floorName}；自己头顶是 ${myHead1}/${myHead2}${wWhy ? `；寻路说 ${wWhy}` : ''}${hopWhy ? `；跳上去三次都没成（${hopWhy}）` : ''}`)
       break
     }
     /* 平台已去掉：每步都是下降步 */
