@@ -32,6 +32,7 @@ import { lavaEscape } from './lava-recovery.mjs'
  *    没人包 `perfWrap` 时它是空操作（零成本）。 */
 import { perfWait } from './perf-monitor.mjs'
 import { startCtrlAudit } from './ctrl-audit.mjs'
+import { startDigAudit } from './dig-audit.mjs'
 
 /** 把控制键审计压成短摘要（完整轨迹太长，只留最后 6 个采样点）。 */
 function ctrlAuditOf (audit) {
@@ -3645,9 +3646,15 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
         await sleep(STEP_UP_TURN_MS)
         const gen0 = ctx?.moveGenOf ? ctx.moveGenOf() : null
         const mine = () => (ctx?.moveGenOf ? ctx.moveGenOf() === gen0 : true)
-        try { b.setControlState('jump', true) } catch {}
-        await sleep(90)
+        /* 🔴 2026-11-05 用户：「allowdig 第一次跳跃上不去，第二次才能跳 —— 是不是第一次没移动」。
+         *   正是：原来是「先 jump、90ms 后才 forward」—— 起跳那一刻人的水平速度是 0，
+         *   整段跳跃只在原地升起又落回（最多蹭到台阶边缘），第二次因为 forward 还按着、
+         *   人已经有速度才跨得上去。`stepUp` 早改成了「先助跑再起跳」，这里漏了。
+         *   现在是「sprint + forward → 助跑 STEP_UP_RUNUP_MS → 再起跳」。 */
+        try { b.setControlState('sprint', true) } catch {}
         try { b.setControlState('forward', true) } catch {}
+        await sleep(STEP_UP_RUNUP_MS)
+        try { b.setControlState('jump', true) } catch {}
         const t0 = Date.now()
         while (Date.now() - t0 < CLIMB_LIFT_MS) {
           if (!mine()) break
@@ -3670,6 +3677,7 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
           }
         }
         try { b.setControlState('forward', false) } catch {}
+        try { b.setControlState('sprint', false) } catch {}
         if (Number(b?.entity?.position?.y ?? yNow) >= fy + 0.75) upOk = true
         else await sleep(60)
       }
@@ -4387,6 +4395,8 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
   /* 控制键审计（2026-11-05）：实机「跳的时候没往前走，第二次跳还往后退了一点」——
    *   “谁在按 forward/back/jump”是唯一能一次定因的证据；只记录，不改行为。 */
   const ctrlAudit = startCtrlAudit(b)
+  /* 挖方块审计：这一趟每一格是谁挖的（我们哪条路径 / 还是 vendor 的 toBreak）。 */
+  const digAudit = startDigAudit(b)
   b.pathfinder.setMovements(mv)
   let why = null
   let dug = 0, placed = 0
@@ -4546,6 +4556,12 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
   let upTries = 0
   /* 🔴 2026-11-02：`allowDig` 那趟第一刀先爬一刀楼梯（见下面 `upFirst`），只做一次。 */
   let upFirstDone = false
+  /* 🔴 2026-11-05 用户：「allowdig+allowtower 一开始会挖 4 次、每次 3 格、而且都是同水平」。
+   *   climbUp 一次挖 3 格（自己头顶 + 斜上脚位/头位），跳不上去时 ok: false 但 dug: 3 ——
+   *   以前只看 cu.tried 就计数、下一轮又挖 3 格，一路能挖 12 格却一格没升。
+   *   现在连着两次「挖开也没升上去」就本趟不再挖（把场面交回 A* / 只垫）。 */
+  let upNoGain = 0
+  let upGaveUp = false
 /* 🔴 2026-11-05 两条上升路（A* 的垫柱边 / 我们自己的 climbUp 挖楼梯）怎么配合。
  *   历史：先是"谁先触发谁动手"⇒ 一趟里来回切，人在原地折腾（用户：「挖了几格又往脚下
  *   搭方块，一会换一种反而上不去」）；改成"开局按价锁定整趟"⇒ 又太死（中途空腔/天花板
@@ -4603,13 +4619,15 @@ const yStartRise = Number(b?.entity?.position?.y ?? NaN)
  *   现在：一次只给 A* 一种上升手段 —— 垫柱档关掉 A* 的挖边，挖台阶档关掉 A* 的垫边。 */
 const applyRiseMode = () => {
   try {
-    if (riseMode === 'tower' || riseMode === 'mixed') {
-      mv.allow1by1towers = true
-      mv.canDig = false
-    } else {
-      mv.allow1by1towers = false
-      mv.canDig = carveNoPathOk
-    }
+    /* 🔴 2026-11-05 用户：「去掉一次只能用一种的限制」。
+     *   这里以前是互斥的：垫那档 canDig = false、挖那档 allow1by1towers = false ——
+     *   于是「要么完全不挖、要么完全不垫」，选错就整趟卡死：mixed 档把 canDig 关了，
+     *   而 climbUp 又只在 riseMode === 'dig' 时才跑 ⇒ 既不垂直挖也不垂直垫，
+     *   只剩 A* 兜圈子 + 横向补挖（用户：「一开始挖 4 次 3 格同水平」）。
+     *   现在两条边都按各自的开关交给 A*，由它按代价自己挑；
+     *   riseMode 只影响**我们自己的 climbUp 先不先用**。 */
+    mv.allow1by1towers = towerAllowed
+    mv.canDig = carveNoPathOk
   } catch { /* 假 bot / 没有 Movements：忽略 */ }
 }
 applyRiseMode()
@@ -5187,7 +5205,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
         if (riseMode === 'dig' && digFailed >= 2) {
           if (!switchRiseMode('挖了两次都没升上去')) digFailed = 0
         }
-        if ((emptyNoPath || vertStuck || upFirst) && riseMode === 'dig'
+        if ((emptyNoPath || vertStuck || upFirst) && riseMode !== 'tower' && !upGaveUp
           && upTries < MOVE_UP_TRIES && downBudgetOk(self)) {
           if (upFirst) upFirstDone = true
           const yUp = Number(b?.entity?.position?.y ?? NaN)
@@ -5215,7 +5233,17 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
               continue
             }
             upLast = { ok: false, up: cu.up ?? 0, why: cu.tried ? (cu.why ?? 'no-lift') : (cu.why ?? 'skip') }
-            if (cu.tried) digFailed++
+            if (cu.tried) {
+              digFailed++
+              upNoGain++
+              if (upNoGain >= 2) {
+                upGaveUp = true
+                self.log(
+                  '⛔ 连着 ' + upNoGain + ' 次挖开斜上方都没升上去（挖了 '
+                  + (Number(cu.dug) || 0) + ' 格，升 0 格）—— 这趟不再挖了，交给 A*（能垫就垫，垫不了就如实报）',
+                )
+              }
+            }
           }
         }
         if (emptyNoPath && carveNoPathOk && carveTries < MOVE_CARVE_TRIES && carved < MOVE_CARVE_TOTAL) {
@@ -5966,6 +5994,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
       /* 这一趟谁按了哪些控制键、forward 与 back 有没有同时按着、位置有没有先增后减。
        *  输出里只留摘要 + 最后 6 个位置采样（完整轨迹太长，模型不需要）。 */
       ...(ctrlAudit ? { ctrlAudit: ctrlAuditOf(ctrlAudit) } : {}),
+...(digAudit ? { digLog: digAudit.summary() } : {}),
       /* 这一趟每种“路径被重置”的原因各发生了几次（含良性）—— 失败时据此定向。 */
       ...(Object.keys(resetSeen).length ? { pathResetSeen: { ...resetSeen } } : {}),
       /* 2026-10-30 实体避让：说清是"谁"挡着（不是墙）、等了多久。 */

@@ -264,9 +264,27 @@ export async function connect (self, opts = {}, ctx = {}) {
 
     try {
       await new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(`连接 ${sub} 超时`)), self.cfg.connectTimeoutMs)
-        b.once('spawn', () => { clearTimeout(t); resolve() })
-        b.once('kicked', (r) => { clearTimeout(t); reject(new Error(`被踢: ${String(r).slice(0, 200)}`)) })
+        /* 🔴 2026-11-05 用户：「连接延迟很高，连错地址后改很慢」。
+         *    原来只等 spawn / kicked / 超时 —— **连接被拒（端口不通、域名解析失败、协议版本不符）
+         *    走的是 'error' 事件**，没人接，于是只能干等到 connectTimeoutMs（原来是 45 秒）。
+         *    现在 error / end 都立刻失败，并把常见 errno 翻成人话。 */
+        let settled = false
+        const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(t); fn(v) }
+        const humanize = (e) => {
+          const code = String(e?.code ?? e?.errno ?? '').toUpperCase()
+          const msg = String(e?.message ?? e ?? '')
+          if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return '域名解析失败（地址拼错了？或者本机没 DNS）'
+          if (code === 'ECONNREFUSED') return '端口没人监听（服务器没开，或端口号不对）'
+          if (code === 'ETIMEDOUT' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH') return '网络不通（地址/端口不可达，或被防火墙挡了）'
+          if (code === 'ECONNRESET') return '连接被重置（服务端主动断开）'
+          if (/version|protocol/i.test(msg)) return `协议版本对不上：${msg.slice(0, 120)}`
+          return `${msg.slice(0, 160)}${code ? `（${code}）` : ''}`
+        }
+        const t = setTimeout(() => done(reject, new Error(`连接 ${sub} 超时（${Math.round((Number(self.cfg.connectTimeoutMs) || 0) / 1000)} 秒没握手成功）`)), self.cfg.connectTimeoutMs)
+        b.once('spawn', () => done(resolve))
+        b.once('kicked', (r) => done(reject, new Error(`被踢: ${String(r).slice(0, 200)}`)))
+        b.once('error', (e) => done(reject, new Error(`连不上 ${sub}：${humanize(e)}`)))
+        b.once('end', (r) => done(reject, new Error(`连接 ${sub} 被关闭（${r || '服务端断开'}）`)))
       })
     } catch (e) {
       try { b.quit() } catch {}

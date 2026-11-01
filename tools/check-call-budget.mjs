@@ -900,5 +900,20 @@ for (const d of TMP_DIRS) { try { rmSync(d, { recursive: true, force: true }) } 
   ok(bad.length === 0, '全仓没有「Math.max(固定数字, …剩余…)」的预算写法（要收口就用 needLeft）', bad.slice(0, 6).join(' ｜ '))
 }
 
+/* 🔴 2026-11-05 用户：「mc_connect 在 dsh 里中断不了，连接延迟很高，连错地址后改很慢」。三件事：
+ *   超时 45s → 12s；等 spawn 时把 error / end 接上（地址错要秒回，不再干等满超时）；
+ *   connect 用 raceAbort 接 exec.signal（点停止就能立刻回来）。 */
+{
+  const rd = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8')
+  const cConn = rd('../src/connection.mjs')
+  const cCore = rd('../src/core.mjs')
+  const cIdx = rd('../index.js')
+  ok(/connectTimeoutMs: 12_000/.test(cCore), '★ 连接超时 12 秒（原来 45 秒）')
+  ok(/b\.once\('error', \(e\) => done\(reject/.test(cConn), '★ 连接被拒（error 事件）立刻失败')
+  ok(/b\.once\('end', \(r\) => done\(reject/.test(cConn), '★ 连接被关闭也立刻失败')
+  ok(/ECONNREFUSED|ENOTFOUND/.test(cConn), '★ 常见 errno 翻成人话（端口不通/域名解析失败）')
+  ok(/raceAbort\(sess\.bot\.connect\(opts\), exec\?\.signal/.test(cIdx), '★ mc_connect 能被中断（接 exec.signal）')
+}
+
 console.log(`\n结果：${pass}/${pass + fail} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)

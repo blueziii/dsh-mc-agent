@@ -668,6 +668,8 @@ section('⑨ noTower（逃跑时关掉"原地垫高"）')
   clock.stopPump()
   ok(mv.allow1by1towers === false, '🔴 noTower ⇒ allow1by1towers = false（逃跑时不再原地垫高）', String(mv.allow1by1towers))
 }
+  ok(/noTower: args\.allowTower !== true/.test(read('../index.js')),
+    '垫柱只认显式 allowTower:true（mc_move 不再偷偷垫）')
 {
   const clock = autoClock()
   const bot = mkLoopBot()
@@ -1954,8 +1956,6 @@ section('⑱ 门失败兜底 / 斜向障碍 / 上方目标垫柱兜底')
   /* 2026-11-02（用户「不要垫，我不是说了只有 allowDig」）：原来这里钉的是
    *   "上方目标、头顶为空 ⇒ 自动垫一次柱"。那段已整段删除 —— 垫柱只认显式
    *   `allowTower:true`（`index.js` 的 `noTower: args.allowTower !== true`）。 */
-  ok(/noTower: args\.allowTower !== true/.test(read('../index.js')),
-    '垫柱只认显式 allowTower:true（mc_move 不再偷偷垫）')
   ok(!/towerTried/.test(src) && !/目标在上方、头顶有空/.test(src),
     '🔴 自动垫柱那段（towerTried / allow1by1towers = true）已彻底删除')
 }
@@ -2625,7 +2625,7 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
     '落地就立刻继续（不再固定睡满 settle 时间）')
   {
     const i0 = src.indexOf('export async function stepUp')
-    const seg = src.slice(i0, src.indexOf('export async function escapeMove', i0))
+    const seg = src.slice(i0, src.indexOf('export async function climbUp', i0))
     const ij = seg.indexOf("setControlState('jump', true)")
     const iw = seg.indexOf("setControlState('forward', true)")
     /* 🔴 2026-11-05 反了：以前钉的是「jump 在 forward 之前」（2026-10-24 的结论：同时按会撞上
@@ -2636,7 +2636,17 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
      *   而且中间隔着 STEP_UP_RUNUP_MS 的助跑。 */
     ok(ij > 0 && iw > 0 && iw < ij, 'forward 在 jump 之前（先助跑再起跳）')
     ok(seg.includes('sleep(STEP_UP_RUNUP_MS)'), '助跑时长用 STEP_UP_RUNUP_MS')
-    ok(!seg.includes("setControlState('sprint', true)"), '起跳不 sprint（2026-11-05 实机：助跑只有 90ms，sprint 会先撞台阶侧面）')
+    ok(!seg.includes("setControlState('sprint', true)"), 'stepUp 自己起跳不 sprint（sprint 由 climbUp/脱困那边管）')
+    /* 🔴 2026-11-05 用户：「allowdig 第一次跳跃上不去，第二次才能跳 —— 是不是第一次没移动」。
+     *   原来是「先 jump、90ms 后才 forward」：起跳瞬间水平速度为 0，整段只在原地起落。
+     *   现在必须先 sprint + forward 助跑 STEP_UP_RUNUP_MS，再起跳。 */
+    const iC = src.indexOf('export async function climbUp')
+    const segC = src.slice(iC, src.indexOf('export async function escapeMove', iC))
+    const iFr = segC.indexOf("setControlState('forward', true)")
+    const iJp = segC.indexOf("setControlState('jump', true)")
+    ok(iFr > 0 && iJp > 0 && iFr < iJp, '★ climbUp 先按前进再起跳（第一次就能跳上去，不用第二次）')
+    ok(segC.includes("setControlState('sprint', true)") && segC.includes('sleep(STEP_UP_RUNUP_MS)'),
+      '★ climbUp 起跳前有 sprint + 助跑 STEP_UP_RUNUP_MS')
     ok(/const ok = up >= 0\.75\n/.test(seg) || /const ok = up >= 0\.75$/.test(seg.trim()) ||
        /const ok = up >= 0\.75(?! &&)/.test(seg), '只认“真抬高了将近一格”，不再要求水平位移（窄井里横向几厘米就撞墙）')
   }
@@ -2720,8 +2730,12 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
    * （以前只认 `emptyNoPath` ⇒ 这种情况一次都没试过，直接报"先走到同一层"）。 */
   ok(/let vertStuck = false/.test(mv2) && /if \(Math\.abs\(dyR\) > 1\.5 && horizR <= arriveUsed \+ 1\.0\) vertStuck = true/.test(mv2),
     '"到了但差层"会被识别成垂直方向没路（vertStuck）')
-  ok(/if \(\(emptyNoPath \|\| vertStuck \|\| upFirst\) && riseMode === 'dig'/.test(mv2),
-    '识别到之后交给往上挖（只有这趟的上升方式是“挖”才动手，垫柱那趟不抢）')
+  ok(/if \(\(emptyNoPath \|\| vertStuck \|\| upFirst\) && riseMode !== 'tower' && !upGaveUp/.test(mv2),
+    '识别到之后交给往上挖（挖/配合两档都动手，只有“纯垫”那趟不抢）')
+  ok(/let upNoGain = 0/.test(mv2) && /let upGaveUp = false/.test(mv2),
+    '★ 有 upNoGain / upGaveUp：连着两次挖开没升上去就本趟不再挖（防一路挖 12 格一格没升）')
+  ok(/if \(upNoGain >= 2\) \{/.test(mv2) && /upGaveUp = true/.test(mv2),
+    '★ 第二次没升上去就置 upGaveUp，并说出“这趟不再挖了”')
   /* 🔴 2026-11-02 用户：「只用 allowDig 上地表，它会乱挖」—— 两条修法各钉一处。 */
   ok(/if \(digDirTax > 0\)/.test(plug2)
     && /m\.cost = \(Number\(m\.cost\) \|\| 0\) \+ digDirTax \* \(dyDir < 0 \? 5 : 2\)/.test(plug2)
@@ -3882,10 +3896,16 @@ ok(/emptyNoPath = noPathPending/.test(mvSrcX), 'emptyNoPath 继承上一轮的 N
    *   现在：一次只给 A* 一种上升手段。 */
   const mR = strip(read('../src/movement.mjs'))
   ok(/const applyRiseMode = \(\) => \{/.test(mR), '★ 有 applyRiseMode：把 riseMode 落到 A* 身上')
-  ok(/if \(riseMode === 'tower' \|\| riseMode === 'mixed'\) \{\s*\n\s*mv\.allow1by1towers = true\s*\n\s*mv\.canDig = false/.test(mR.replace(/\r\n/g, '\n')),
-    '垫那侧（tower/mixed）：开 allow1by1towers、关掉 A* 的挖边（不然它按 4 分一格的价格一直挖）')
-  ok(/mv\.allow1by1towers = false\s*\n\s*mv\.canDig = carveNoPathOk/.test(mR.replace(/\r\n/g, '\n')),
-    '挖台阶档：关掉 A* 的垫边，挖边只按 allowDig 的许可开')
+  ok(/mv\.allow1by1towers = towerAllowed\s*\n\s*mv\.canDig = carveNoPathOk/.test(mR.replace(/\r\n/g, '\n')),
+    '★ 两边都交给 A*：allow1by1towers 按 allowTower、canDig 按 allowDig（不再互相排斥）')
+  {
+    const iAM = mR.indexOf('const applyRiseMode = () => {')
+    const segAM = iAM > 0 ? mR.slice(iAM, mR.indexOf('applyRiseMode()', iAM)) : ''
+    /* 只查 applyRiseMode 自己那段：别处 `if (noTower) mv.allow1by1towers = false` 是“不许垫”的正经开关。 */
+    ok(segAM.length > 0 && !/allow1by1towers = false/.test(segAM)
+      && !/riseMode === 'tower' \|\|/.test(segAM),
+      '★ applyRiseMode 里不再互斥（以前“要么完全不挖、要么完全不垫”，选错就整趟卡死）')
+  }
   ok(/applyRiseMode\(\)      \/\/ 改完立刻落到 A\* 身上/.test(mR), '切换后立刻生效（下一次 goto 就换一侧）')
   ok(/applyRiseMode\(\)   \/\/ 兜一次/.test(mR) && mR.indexOf('applyRiseMode()   // 兜一次') < mR.indexOf('b.pathfinder.goto(goal)'),
     '每次 goto 前兜一次，保证 A* 拿到与 riseMode 一致的 movements')
@@ -3921,6 +3941,22 @@ ok(/emptyNoPath = noPathPending/.test(mvSrcX), 'emptyNoPath 继承上一轮的 N
   ok(!/MOVE_HEAD_CLEAR_MAX/.test(mH), '★ 不再有“每轮清头顶”那块（它挖自己头顶两格却不上升）')
   ok(!/headClearOk/.test(mH), '★ 也不再靠 headClearOk 门控（整块已删）')
   ok(/const overhead = at\(fx, fy \+ 2, fz\)/.test(mH), 'climbUp 仍会先清自己头顶那一格（有上升伴随）')
+}
+
+/* 🔴 2026-11-05 用户：「我是说改方向，这个问题一直有，你是不是忽略了什么。加大审查范围」。
+ *   能挖方块的入口有 8 处以上，最大的一处是 **vendor A* 自己的 toBreak**（allowDig:true 时
+ *   canDig 是开的，它在规划出的路径上自己挖）—— 那一处我们一条日志都没有，于是"这一格是谁挖的"只能猜。
+ *   现在包一层 bot.dig 记账，结果里透出 digLog。 */
+{
+  const dA = strip(read('../src/dig-audit.mjs'))
+  ok(/export function startDigAudit/.test(dA), '★ 挖方块审计模块存在')
+  ok(/orig\.call\(this, blk, \.\.\.rest\)/.test(dA), '★ 审计只记录、不改行为（原样转发）')
+  ok(/bot\.__mcDigAuditCtl/.test(dA), '★ 单例：重复调用只 reset，不重复包装')
+  const mD = strip(read('../src/movement.mjs'))
+  ok(/const digAudit = startDigAudit\(b\)/.test(mD), '★ walkPathfinder 里开了挖方块审计')
+  ok(/digLog: digAudit\.summary\(\)/.test(mD), '★ 结果里透出 digLog')
+  const bD = strip(read('../src/brief.mjs'))
+  ok(/'digLog'/.test(bD), '★ brief 把 digLog 列进 DIAG_KEYS')
 }
 
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)

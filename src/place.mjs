@@ -246,7 +246,13 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
        *    （旧注释里"等脚真的离开整格"的意图是对的，只是 `frac` 那个写法做不到 ——
        *      跨过整数格时小数部分会从 0.99 回绕成 0.0x，反而更早 break。） */
       const y0 = (() => { try { return b.entity?.position?.y } catch { return null } })()
-      const needRise = inWater ? 0.5 : 0.95
+      /* 🔴 2026-11-01 用户：「现在有概率搭不上，无论 allowtower 还是 place」。
+       *   两条路共用的物理事实：包里带的是**发那一刻**的朝向/位置，服务端按**收到那一刻**
+       *   校验“这一格有没有实体占着”。原来等到 0.95 格（顶点 1.25 附近）才发，
+       *   加上一个往返（几十~三百毫秒）到服务端时人已经往下掉了 ⇒ 偶发重叠被拒。
+       *   0.72 格时人已经完全离开方块那格（方块顶面就是脚底原高度），而且离落地还有约 0.45 秒，
+       *   够 RTT 走完。水里浮力小、抬升慢，单独给 0.35。 */
+      const needRise = inWater ? 0.35 : 0.72
       const t0 = Date.now()
       let bestRise = -Infinity
       let lastProgress = Date.now()
@@ -268,7 +274,10 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
       if (!reached && roseAtAll && bestRise < needRise - 0.15) {
         lastErr = new Error(`跳起来只抬到 ${Number.isFinite(bestRise) ? bestRise.toFixed(2) : '0'} 格`
           + `（要 ${needRise} 格才进放置窗口），这一轮没放`)
-        await sleep(80)
+        /* 重跳之前必须**先落地**：人还在空中时 setControlState('jump', true) 不生效，
+         *   白等一轮（这也是“第一次跳不上、第二次才行”的另一半原因）。 */
+        for (let g = 0; g < 20 && b?.entity?.onGround === false; g++) await sleep(50)
+        await sleep(60)
         continue
       }
       const target = placeTargetOf(refBlock, face)
@@ -287,7 +296,28 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
         const c = await confirmPlaced(b, target, { name: want, before, waitMs: 600 })
         try { b.__placeConfirm = c } catch { /* 记账失败不影响结果 */ }
         if (c.state === 'appeared') { noteOwnPlaced(b, target); return true }
-        lastErr = new Error(`回包说放上了，但 ${target?.x},${target?.y},${target?.z} 还是 ${c.got ?? '空'}`)
+        /* 🔴 2026-11-01 用户：「跳是跳了，手也有放置动作，但是没放下去」。
+         *   这种“客户端发了 block_place、服务端静默拒绝”的情况 mineflayer 不会抛错，
+         *   只能靠世界没变来发现 —— 所以这里把**现场**一起报出来，别只报“还是空”：
+         *   那格现在是什么方块 / 我离它多远 / 手上拿的什么 / 那格被哪个实体占着。 */
+        const diag = (() => {
+          try {
+            const at = b.blockAt(target, false)
+            const d = Math.sqrt(
+              (b.entity.position.x - (target.x + 0.5)) ** 2
+              + (b.entity.position.z - (target.z + 0.5)) ** 2,
+            )
+            const occ = Object.values(b.entities ?? {})
+              .filter((e) => e && e !== b.entity && e.position
+                && Math.abs(e.position.x - (target.x + 0.5)) < 0.9
+                && Math.abs(e.position.z - (target.z + 0.5)) < 0.9
+                && e.position.y > target.y - 1 && e.position.y < target.y + 2)
+              .map((e) => e.name ?? String(e.type))
+            return `（那格现在是 ${at?.name ?? '读不到'}；我离它 ${d.toFixed(2)} 格；手上 ${b.heldItem?.name ?? '空手'}`
+              + `${occ.length ? `；那格里站着 ${occ.join(',')}` : ''}）`
+          } catch { return '' }
+        })()
+        lastErr = new Error(`回包说放上了，但 ${target?.x},${target?.y},${target?.z} 还是 ${c.got ?? '空'}${diag}`)
       } catch (e) {
         /* 🔴 用户 2026-10-29：没回包 ≠ 没放上。先看世界再判。 */
         const c = await confirmPlaced(b, target, { name: want, before, waitMs: 900 })
@@ -297,11 +327,15 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
           try { b.__placeConfirm = { ...c, state: 'refused' } } catch { /* 同上 */ }
           /* 明确拒绝也**继续重试**剩下的次数（服务端有时是“这一瞬”拒），
            * 但把原始消息带上 —— 外层要按 `Server refused to place` 翻译成中文。 */
-          lastErr = new Error(`服务端明确拒绝放置 —— ${e.message}`)
+            lastErr = new Error(`服务端明确拒绝放置 —— ${e.message}`)
+        } else {
+          lastErr = e
         }
-        lastErr = e
       }
-      await sleep(120)   // 落地了再跳一次
+      /* 注释原本就写着“落地了再跳一次”，但只 sleep 120ms —— 人还在空中，
+       *   紧接着的 setControlState('jump', true) 根本不生效 ⇒ 白费一次重试。 */
+      for (let g = 0; g < 20 && b?.entity?.onGround === false; g++) await sleep(50)
+      await sleep(100)
     }
     throw lastErr ?? new Error('跳起来也没放上')
   } finally {

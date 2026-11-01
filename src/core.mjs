@@ -182,7 +182,9 @@ export const DEFAULTS = {
   authUrl: process.env.MC_AUTH_URL ?? '',
   authUser: process.env.MC_AUTH_USER ?? '',
   authPass: process.env.MC_AUTH_PASS ?? '',
-  connectTimeoutMs: 45_000,
+  /* 🔴 2026-11-05 用户：「mc_connect 连接延迟很高，连错地址后改很慢」。45 秒太长 ——
+     *    地址打错/端口不通/域名解析失败本该秒回。12 秒够局域网与正常服务器握手，慢服可自己调大。 */
+    connectTimeoutMs: 12_000,
   moveBudgetMs: CALL_BUDGET_MS,   // 2026-10-28 参数审计：原来 40_000（超单次上限 CALL_MS）⇒“忘了传 budget”的内部走路以为有 40 秒
   preferDoors: true, doorDigPenalty: 8,   // 优先走门/绕路：给"挖墙"加代价（2026-10-18）
   walkDigFirst: false, walkDigFirstCost: 0.4,   // 2026-10-31：默认关（一律先绕、绕不过才挖）；true = 挖一格按 0.4 步计价

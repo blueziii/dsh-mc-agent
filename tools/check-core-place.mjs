@@ -583,5 +583,19 @@ section('🧱 放置确认的三条硬要求（变体、放置前状态、跳跃
     '跳不到放置窗口就不发那一次包（差得多先重跳，别白放 + 白等两次复核）')
 }
 
+
+/* 🔴 2026-11-01 用户：「跳是跳了，手也有放置动作，但是没放下去」「有概率搭不上，无论 allowtower 还是 place」 */
+{
+  const ps2 = readFileSync(new URL('../src/place.mjs', import.meta.url), 'utf8')
+  const psLF = ps2.replace(/\r\n/g, '\n')
+  ok(/const needRise = inWater \? 0\.35 : 0\.72/.test(ps2),
+    '★ 抬升窗口提前到 0.72 格（0.95 太靠顶点，包到服务端时人已下落 ⇒ 偶发重叠被拒）')
+  ok(/那格现在是 \$\{at\?\.name/.test(ps2) && /那格里站着/.test(ps2),
+    '★ 放置失败时把现场摊开（那格现在是什么 / 离它多远 / 手上什么 / 那格有没有实体）')
+  ok(/else \{\n\s+lastErr = e\n\s+\}/.test(psLF),
+    '★ “服务端明确拒绝”的原始消息不再被下一行无条件覆盖')
+  ok(/for \(let g = 0; g < 20 && b\?\.entity\?\.onGround === false; g\+\+\)/.test(ps2),
+    '★ 重试前先等落地（人还在空中按 jump 不生效，等于白费一次重试）')
+}
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

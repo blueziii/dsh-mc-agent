@@ -29,6 +29,7 @@ import { createRequire } from 'node:module'
 import { resolve, sep, join, isAbsolute, dirname, basename } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { briefOf, finiteOnly } from './src/brief.mjs'
+import { raceAbort } from './src/async-util.mjs'
 import { McBot, lossless, logLine, logDebug, logOnce, logLevel, libraryInfo, CALL_MS, callBudget, redactPath } from './src/core.mjs'
 import { defineTool, toolDefKind, loosenNumberParams, coerceNumberArgs } from './src/tool-def.mjs'
 import { inWaterNow } from './src/world-observer.mjs'
@@ -3312,8 +3313,17 @@ export function apply(ctx, rawConfig) {
       }
 
       try {
-        await sess.bot.connect(opts)
+        /* 🔴 2026-11-05 用户：「mc_connect 在 dsh 里中断不了」。connect 是唯一一处“等着握手”的长 await，
+         *    以前没接 exec.signal ⇒ 点了停止也没反应，只能等满 connectTimeoutMs（原来 45 秒）。
+         *    现在用 raceAbort 包一层：signal 一 abort 就立刻抛，并把半成品连接扔掉。
+         *    （底层那条 promise 由 raceAbort 内部 catch 认领，不会变成未处理拒绝。） */
+        await raceAbort(sess.bot.connect(opts), exec?.signal, '连接服务器')
       } catch (e) {
+        try {
+          if (String(e?.name ?? '') === 'AbortError' || /取消|中止|abort/i.test(String(e?.message ?? ''))) {
+            await sess.bot.disconnect?.()
+          }
+        } catch { /* 扔不掉就算了，反正下一句就抛错 */ }
         throw withUserHint(e, resolved.label)
       }
       sess.mode = 'active'
