@@ -240,7 +240,7 @@ section('③ classifyTerrain：六类 + 优先级 + 最少证据量')
 section('④ profileFor：每一类一套权重，用户配置优先')
 {
   const flat = profileFor('flat')
-  ok(flat.cost.maxDropDown === 3 && flat.cost.digCost === 4 && flat.cost.placeCost === 12 && flat.cost.liquidCost === 4,
+  ok(flat.cost.maxDropDown === 3 && flat.cost.digCost === 0.6 && flat.cost.placeCost === 2.5 && flat.cost.liquidCost === 4,
     'flat = 改动前那套全局值（3/4/4/12）', JSON.stringify(flat.cost))
   ok(flat.cost.allowParkour === false, 'flat：跳远默认关')
 /* 🔴 2026-10-30 用户：「智能规划路线，不要兜底」—— 以前 8 档全关，柱林/断崖之间
@@ -278,7 +278,7 @@ ok(profileFor('gap', { walkAllowParkour: false }).cost.allowParkour === false, '
   ok(profileFor('hazard', { walkLiquidCost: 2 }).cost.liquidCost === 2, '用户设了 walkLiquidCost ⇒ 盖过危险地形的 20')
   ok(profileFor('flat', { walkAllowParkour: true }).cost.allowParkour === true, '用户开了跳远 ⇒ 开着')
   ok(profileFor('flat', { walkAllowParkour: 'yes' }).cost.allowParkour === false, '跳远只认严格的 true（"yes" 不算）')
-  ok(profileFor('flat', { walkDigCost: 'abc' }).cost.digCost === 4, 'cfg 给的不是数 ⇒ 不覆盖（不把权重弄成 NaN）')
+  ok(profileFor('flat', { walkDigCost: 'abc' }).cost.digCost === 0.6, 'cfg 给的不是数 ⇒ 不覆盖（不把权重弄成 NaN）')
   ok(profileFor('flat', { walkMaxDropDown: null }).cost.maxDropDown === 3, 'cfg 是 null ⇒ 不算设过')
   ok(Object.keys(TERRAIN_CFG_KEYS).length === 5, '5 个可覆盖字段都登记了配置键', JSON.stringify(TERRAIN_CFG_KEYS))
 }
@@ -288,12 +288,12 @@ section('⑤ applyProfile：写到真的 Movements 上')
 {
   const mv = { maxDropDown: 4, liquidCost: 1, digCost: 1, placeCost: 1, allowParkour: true }
   const changed = applyProfile(mv, profileFor('flat'))
-  ok(mv.maxDropDown === 3 && mv.digCost === 4 && mv.placeCost === 12 && mv.liquidCost === 4, '权重真的写进去了', JSON.stringify(mv))
+  ok(mv.maxDropDown === 3 && mv.digCost === 0.6 && mv.placeCost === 2.5 && mv.liquidCost === 4, '权重真的写进去了', JSON.stringify(mv))
   ok(mv.allowParkour === false, '跳远也被关掉了')
   ok(changed.length === 5, '5 个字段都变了 ⇒ changed 5 条', JSON.stringify(changed))
   ok(changed.every((s) => s.includes('=')), 'changed 里是 "字段=值" 的样子', JSON.stringify(changed))
 
-  const mv2 = { maxDropDown: 3, liquidCost: 4, digCost: 4, placeCost: 12, allowParkour: false }
+  const mv2 = { maxDropDown: 3, liquidCost: 4, digCost: 0.6, placeCost: 2.5, allowParkour: false }
   ok(applyProfile(mv2, profileFor('flat')).length === 0, '值本来就对 ⇒ 不算改动（changed 空）')
 
   ok(applyProfile(null, profileFor('flat')).length === 0, '没有 mv ⇒ 空数组，不炸')
@@ -434,7 +434,7 @@ section('⑦ 端到端：movements(self, { terrain }) 真的换了一套权重')
   const self = (cfg = {}) => ({ bot: mkBot(flatScene().w, { x: 0, y: 64, z: 0 }), cfg, _pf: { Movements: FakeMovements } })
 
   const flat = movements(self())
-  ok(flat.maxDropDown === 3 && flat.digCost === 4 && flat.placeCost === 12 && flat.liquidCost === 4,
+  ok(flat.maxDropDown === 3 && flat.digCost === 0.6 && flat.placeCost === 2.5 && flat.liquidCost === 4,
     '不给地形 ⇒ 平地那套（= 改动前的全局值）', JSON.stringify([flat.maxDropDown, flat.digCost, flat.placeCost, flat.liquidCost]))
   ok(flat.canDig === true && flat.allowSprinting === true && flat.dontMineUnderFallingBlock === true,
     '跟地形无关的那几项照旧（canDig / 疾跑 / 别挖悬空方块下面）')
@@ -444,8 +444,8 @@ section('⑦ 端到端：movements(self, { terrain }) 真的换了一套权重')
   ok(hazard.canDig === true, 'canDig 不受地形影响（还是配置说了算）')
 
   const gap = movements(self(), { terrain: { kind: 'gap' } })
-  ok(gap.placeCost === 8 && gap.placeCost < flat.placeCost, '沟边垫方块比平地便宜、但不再是最便宜的那一档')
-  ok(movements(self(), { terrain: { kind: 'steps' } }).digCost === 3, '台阶上挖便宜一点')
+  ok(gap.placeCost === 1.7 && gap.placeCost < flat.placeCost, '沟边垫方块比平地便宜、但不再是最便宜的那一档')
+  ok(movements(self(), { terrain: { kind: 'steps' } }).digCost === 0.45, '台阶上挖便宜一点')
   ok(movements(self(), { terrain: { kind: 'drops' } }).maxDropDown === 2, '落差上允许往下跳的格数收窄')
 
   const mine = movements(self({ walkMaxDropDown: 9, walkAllowParkour: true }), { terrain: { kind: 'hazard' } })

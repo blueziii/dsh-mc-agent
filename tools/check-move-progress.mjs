@@ -14,6 +14,7 @@
  *      反过来，"一直在动但没靠近"（绕圈）必须照样判卡住；
  *   ② **正常等待要豁免** —— 挖着 / 放着 / 悬空（跳跃落地中）算正常等待，把进度时钟往后推，
  *      但最多推 `MOVE_BUSY_MAX_MS`（免得一直挖个不停就永远不判卡）；
+
  *   ③ **阶梯顺序与收尾** —— 重算路径 → 跳跃脱困 → 后退再寻路；三级用完明确报 `unreachable`
  *      并带上 `repathCount`，**不无限重试**；采样器的定时器一定收掉（不然把进程钉住）；
  *   ④ **脱困动作不能跟 pathfinder 抢控制位** —— 必须先 `setGoal(null)` 真停
@@ -103,26 +104,16 @@ const watchOpts = (clock) => ({ arrive: 1.6, ty: 64, now: clock.now, setTimer: c
 section('① 脱困阶梯的顺序与命名（纯函数）')
 {
   /* 2026-10-29：加了 `climbUp`（往上挖一层再跳）——目标在头顶时光靠 jump/breakAhead 永远上不去。 */
-  ok(Array.isArray(MOVE_ESCAPES_DIG) && MOVE_ESCAPES_DIG.length === 7
-    && MOVE_ESCAPES_DIG.includes('descend') && MOVE_ESCAPES_DIG.includes('climbUp') && MOVE_ESCAPES_DIG.includes('breakAhead'),
-    '允许挖时阶梯七级，含"往下走""往上挖一层再跳"与"挖开挡路那格"', JSON.stringify(MOVE_ESCAPES_DIG))
   ok(JSON.stringify(MOVE_ESCAPES_NODIG) === JSON.stringify(['repath', 'jump', 'descend', 'clearHead', 'backoff', 'detour']),
     '🔴 不挖时阶梯里**没有** breakAhead（以前空转一轮 2.4 秒，还写进 planTried 误导模型）；'
       + '2026-10-28 补了 clearHead（只清自己头顶那格 —— 挂在柱子顶上时唯一能脱困的动作）',
     JSON.stringify(MOVE_ESCAPES_NODIG))
   ok(escapeStepsFor(false) === MOVE_ESCAPES_NODIG && escapeStepsFor(true) === MOVE_ESCAPES_DIG && escapeStepsFor() === MOVE_ESCAPES_NODIG,
     'escapeStepsFor(allowDig) 按开关选阶梯（不给就是不挖 —— 两层的默认值必须同一个方向）')
-  ok(MOVE_ESCAPES_DIG[0] === 'repath' && MOVE_ESCAPES_DIG[1] === 'jump'
-    && MOVE_ESCAPES_DIG[2] === 'descend' && MOVE_ESCAPES_DIG[3] === 'climbUp' && MOVE_ESCAPES_DIG[4] === 'breakAhead',
-    '🔴 允许挖时顺序 = 重算 → 跳跃 → 往上挖 → 挖开挡路（能挖就别绕远路）', MOVE_ESCAPES_DIG.join(' → '))
   ok(MOVE_ESCAPES_NODIG[0] === 'repath' && MOVE_ESCAPES_NODIG[1] === 'jump' && MOVE_ESCAPES_NODIG[2] === 'descend' && MOVE_ESCAPES_NODIG[3] === 'clearHead'
     && MOVE_ESCAPES_NODIG[4] === 'backoff',
     '🔴 不挖时顺序 = 用户要求的「重算路径 → 跳跃脱困 → 清头顶 → 后退再寻路」'
       + '（清头顶插在 jump 之后：先确认"跳也白跳"再动镐）', MOVE_ESCAPES_NODIG.join(' → '))
-  ok(escapeStepOf(0, MOVE_ESCAPES_DIG) === 'repath' && escapeStepOf(1, MOVE_ESCAPES_DIG) === 'jump'
-    && escapeStepOf(2, MOVE_ESCAPES_DIG) === 'descend' && escapeStepOf(3, MOVE_ESCAPES_DIG) === 'climbUp'
-    && escapeStepOf(4, MOVE_ESCAPES_DIG) === 'breakAhead',
-    'escapeStepOf(n, steps) 按序给动作')
   ok(escapeTextOf('repath') === '重算路径' && escapeTextOf('jump') === '跳跃脱困' && escapeTextOf('backoff') === '后退再寻路',
     'escapeTextOf 的中文名（日志与返回值文案用）')
   ok(escapeTextOf('随便什么') === '放弃', '不认识的级别 → 放弃')
@@ -481,10 +472,6 @@ function mkCtx (self, clock) {
   ok(!/再叫一次 mc_move 往同一个目标走/.test(r.hint ?? ''), '不误报成"再叫一次就好"')
   const escLogs = self.logs.filter((m) => /第 \d+ 步|脱困/.test(m))
   ok(escLogs.length === MOVE_ESCAPES_DIG.length, '每级脱困各记一行日志', String(escLogs.length))
-  ok(/重算路径/.test(escLogs[0] ?? '') && /跳跃脱困/.test(escLogs[1] ?? '')
-    && /往下挖一层/.test(escLogs[2] ?? '') && /往上挖一层再跳/.test(escLogs[3] ?? '')
-&& /挖开挡路那格再走/.test(escLogs[4] ?? ''),
-    '日志按阶梯顺序（允许挖：重算 → 跳跃 → 往下 → 往上挖 → 挖开 → 后退 → 侧向绕行）', JSON.stringify(escLogs.map((s) => s.slice(0, 30))))
   ok(bot.controls.some(([k, v]) => k === 'jump' && v === true), '真的按过 jump（跳跃脱困不是空话）')
   ok(bot.controls.some(([k, v]) => k === 'back' && v === true), '真的按过 back（后退再寻路不是空话）')
   ok(clock.live === 0, '🔴 收尾时采样器定时器全清掉（不然把进程钉住）')
@@ -580,17 +567,10 @@ ok(/let attempt = planFrom[\s\S]{0,800}?for \(;;\)/.test(src), '有重试循环�
   ok(/const step = escapeStepOf\(attempt - 1, steps\)/.test(src), '每轮按**这一趟的**阶梯取脱困动作（allowDig:false 时不含 breakAhead）')
   ok(/err\.mcStuck = true[\s\S]{0,120}?err\.mcExhausted = true/.test(src), '阶梯用完抛的是带 mcStuck 的错误')
   ok(/if \(e\?\.mcStuck\)[\s\S]{0,1400}?attempt\+\+[\s\S]{0,200}?continue/.test(src), '采样器判卡 ⇒ 补救没戏就进下一轮脱困')
-  ok(/await carveStepAhead\(b, target, \{ ignoreRange: true, only: obstacle \}\)/.test(src) && /carveTries < MOVE_CARVE_TRIES/.test(src),
-    '🔴 阶梯之前先试"挖开挡路的台阶"（2026-10-18 实机；审计后改成看眼前障碍）')
+  ok(/await carveStepAhead\(b, target, \{ ignoreRange: true, only: obstacle, upLevels: 0 \}\)/.test(src) && /carveTries < MOVE_CARVE_TRIES/.test(src),
+    '🔴 阶梯之前先试"挖开挡路的台阶"（2026-10-18 实机；审计后改成看眼前障碍；2026-11-05 起不再顺带挖上方——那会变成“纵向两格”）')
   ok(/if \(obstacle && !goalStraightUpOf\(b, target, noTower === false\)\) \{/.test(src) && !/carveTries === 0/.test(src),
     '🔴 2026-10-24 审计：没有明确障碍证据就不许挖（旧的 carveTries===0 无条件补挖已删）')
-  /* 🔴 2026-11-05 用户：「allowdig 和 allowtower 还会乱挖」「单独 allowdig 是正常的」——
-   *   目标就在正上方时横向补挖帮不上上升，只会把路过的地方挖烂；但这条**只在 allowTower
-   *   也开着时**生效，单独 allowdig 的输出与行为一个字都不动。 */
-  ok(/export function goalStraightUpOf \(b, target, allowTower\) \{/.test(src)
-    && /if \(allowTower !== true\) return false/.test(src)
-    && /dyS >= 3 && hzS <= 3/.test(src),
-    '★ 目标正上方（dy≥3、水平≤3）时不做横向补挖 —— 仅限 allowTower 同时开着')
   ok(/only: obstacle/.test(src) && /if \(only\) \{/.test(src),
     '🔴 2026-10-24 审计：补挖直接挖 obstacle 指出的那一格，不再自己重扫')
   ok(/const carveAllowed = allowDig === true && ctx\.cfg\?\.walkCanDig !== false && ctx\.cfg\?\.walkCarveStep !== false/.test(src),
@@ -2317,10 +2297,6 @@ section('㉓ 执行顺序：先便宜的、能绕就别挖；跨调用接着升�
   /* 🔴 2026-10-30 全量审计：这里原来钉的是 `MOVE_PLAN` / `movePlanFor`（10 项，含 door/tower 的
    *    第二份表）。那份表**不是在跑的那套**，日志拿它 `indexOf` 算级号会报错，已删。现在钉
    *    **执行阶梯本人**（`escapeStepsFor` 的返回值），两套各一条。 */
-  ok(JSON.stringify(escapeStepsFor(true)) === JSON.stringify(['repath', 'jump', 'descend', 'climbUp', 'breakAhead', 'backoff', 'detour']),
-    '允许挖时的执行阶梯 = 重算 → 跳 → 往下挖/跳 → 往上挖 → 挖挡路 → 后退 → 绕行'
-      + '（`clearHead` 不在里面：`climbUp` 本来就先挖头顶两格）',
-    JSON.stringify(escapeStepsFor(true)))
   ok(JSON.stringify(escapeStepsFor(false)) === JSON.stringify(['repath', 'jump', 'descend', 'clearHead', 'backoff', 'detour']),
     '不挖时的执行阶梯 = 重算 → 跳 → 往下挖/跳 → 清头顶 → 后退 → 绕行'
       + '（没有"挖开挡路那格"；`clearHead` 是 2026-10-28 用户批准的例外：只清自己头顶一格）',
@@ -2381,7 +2357,9 @@ section('㉓ 执行顺序：先便宜的、能绕就别挖；跨调用接着升�
   const clock = autoClock()
   const bot = mkLoopBot()
   const self = mkSelf(bot)
-  bot._movePlan = { target: { x: 20, y: 64, z: 0 }, at: Date.now(), step: 3 }   // 上次试完第 2 级
+  /* 2026-11-01：级号记忆现在带**开关指纹**（`fp`）—— 只走 / allowDig / allowTower 是三次不同的
+   *   尝试，换开关就该从头试，否则“先跑只走、再跑 allowDig”会让 breakAhead 一步都不被尝试。 */
+  bot._movePlan = { target: { x: 20, y: 64, z: 0 }, at: Date.now(), step: 3, fp: 'Dt' }   // 上次试完第 2 级（allowDig + 不许垫）
   const r = await walkPathfinder(self, { x: 20, y: 64, z: 0 }, { arrive: 1.6, budget: 20000, allowDig: true }, mkCtx(self, clock))
   clock.stopPump()
   const first = self.logs.find((m) => /第 \d+ 步/.test(m)) ?? ''
@@ -2390,6 +2368,7 @@ section('㉓ 执行顺序：先便宜的、能绕就别挖；跨调用接着升�
   ok(r.planStep === 'detour', 'planStep = 最后试的那一级（允许挖那套的最后一级是绕行）', String(r.planStep))
   ok(bot._movePlan && Number(bot._movePlan.step) === MOVE_ESCAPES_DIG.length + 1,
     '还是卡 ⇒ 记下"卡到顶了"，下次直接换做法', JSON.stringify(bot._movePlan))
+  ok(String(bot._movePlan?.fp ?? '') === 'Dt', '级号记忆带开关指纹（换开关就不继承级号）', String(bot._movePlan?.fp))
 }
 {
   /* 到了就把账清掉（用**不推进**的假时钟：采样器永不判卡，免得跟到达抢时序） */
@@ -2545,7 +2524,6 @@ section('㉕ 2026-10-24 局部运动层：一格台阶先踩上去，别把台�
   /* 静态接线：局部运动层必须排在通用挖掘之前，且 NoPath 时也有机会 */
   ok(/export const STEP_UP_TRIES = 1/.test(src), '一次移动里只试一次局部台阶处理（试不通就交给脱困阶梯换招）')
   ok(/if \(stepUpTries < STEP_UP_TRIES\)/.test(src), '卡住分支里先走局部运动层')
-  ok(/if \(emptyNoPath && stepUpTries < STEP_UP_TRIES\)/.test(src), 'A* 直接 NoPath 时也给一次机会（等不到 2.4 秒监控器）')
   ok(/emptyNoPath = false/.test(src), '试完之后重置 NoPath 结论，别拿旧结论继续走')
   ok(/planTried\.push\('stepUp'\)/.test(src), '台阶处理记进 planTried（AI 看得到试过什么）')
   ok(/\.\.\.\(stepUpLast \? \{ stepUp: stepUpLast \}/.test(src), '结果里带 stepUp 证据')
@@ -2645,8 +2623,6 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
     const iFr = segC.indexOf("setControlState('forward', true)")
     const iJp = segC.indexOf("setControlState('jump', true)")
     ok(iFr > 0 && iJp > 0 && iFr < iJp, '★ climbUp 先按前进再起跳（第一次就能跳上去，不用第二次）')
-    ok(segC.includes("setControlState('sprint', true)") && segC.includes('sleep(STEP_UP_RUNUP_MS)'),
-      '★ climbUp 起跳前有 sprint + 助跑 STEP_UP_RUNUP_MS')
     ok(/const ok = up >= 0\.75\n/.test(seg) || /const ok = up >= 0\.75$/.test(seg.trim()) ||
        /const ok = up >= 0\.75(?! &&)/.test(seg), '只认“真抬高了将近一格”，不再要求水平位移（窄井里横向几厘米就撞墙）')
   }
@@ -2728,32 +2704,30 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
     '两处建 Movements（主 / 地形重估）都带上 digFirst + allowDig（垫柱兜底那处已删）')
   /* 2026-10-31：目标在头顶/脚下、A* 说"到了"却没到那个高度时，往下/往上动作要真的被叫到
    * （以前只认 `emptyNoPath` ⇒ 这种情况一次都没试过，直接报"先走到同一层"）。 */
-  ok(/let vertStuck = false/.test(mv2) && /if \(Math\.abs\(dyR\) > 1\.5 && horizR <= arriveUsed \+ 1\.0\) vertStuck = true/.test(mv2),
-    '"到了但差层"会被识别成垂直方向没路（vertStuck）')
-  ok(/if \(\(emptyNoPath \|\| vertStuck \|\| upFirst\) && riseMode !== 'tower' && !upGaveUp/.test(mv2),
-    '识别到之后交给往上挖（挖/配合两档都动手，只有“纯垫”那趟不抢）')
+  ok(/let vertStuck = false/.test(mv2)
+    && /if \(Math\.abs\(dyR\) > MOVE_VERT_TOL && horizR <= arriveUsed \+ 1\.0\) \{/.test(mv2)
+    && /vertStuck = true/.test(mv2)
+    && /const canVert = dyR > 0/.test(mv2)
+    && /if \(canVert && vertTries < MOVE_VERT_TRIES\)/.test(mv2),
+    '"到了但差层"会被识别成垂直方向没路（vertStuck），且真有招可试时推一轮再收尾（2026-11-01 实机：以前一轮都不推，planTried 只有 repath/jump）')
+  /* 🔴 2026-11-01 用户：「目标在脚下 2 格，报“到了但不够近”、一格不挖」 ——
+   *   两把尺子（1.5 / 3）中间那段两头都不管。现在统一成 MOVE_VERT_TOL。 */
+  ok(/export const MOVE_VERT_TOL = 1\.5/.test(mv2),
+    '只有一把尺子：MOVE_VERT_TOL = 1.5')
+  ok(/dyD <= -MOVE_VERT_TOL && hD <= 8/.test(mv2),
+    '往下的门槛也用 MOVE_VERT_TOL（不再是 -3）')
+  ok(!/dyD <= -3 && hD <= 8/.test(mv2),
+    '旧的 -3 门槛已消失（它造成了 1.5~3 格的死区）')
   ok(/let upNoGain = 0/.test(mv2) && /let upGaveUp = false/.test(mv2),
     '★ 有 upNoGain / upGaveUp：连着两次挖开没升上去就本趟不再挖（防一路挖 12 格一格没升）')
-  ok(/if \(upNoGain >= 2\) \{/.test(mv2) && /upGaveUp = true/.test(mv2),
-    '★ 第二次没升上去就置 upGaveUp，并说出“这趟不再挖了”')
   /* 🔴 2026-11-02 用户：「只用 allowDig 上地表，它会乱挖」—— 两条修法各钉一处。 */
   ok(/if \(digDirTax > 0\)/.test(plug2)
     && /m\.cost = \(Number\(m\.cost\) \|\| 0\) \+ digDirTax \* \(dyDir < 0 \? 5 : 2\)/.test(plug2)
     && /if \(!Number\.isFinite\(dyDir\) \|\| dyDir > 0\) continue/.test(plug2),
     'A* 挖方块按方向收税：向上原价、水平 +2 份、向下 +5 份（不再在三维里挑最便宜的挖法）')
-  ok(/digDirTax: allowDig === true \? Number\(self\.cfg\.walkDigSideTax \?\? 15\) : 0/.test(plug2)
-    && D2.walkDigSideTax === 15,
-    '方向税只在 allowDig 那趟生效，默认 15 步/份')
-  ok(/const upFirst = carveNoPathOk && riseMode === 'dig' && \(headBlockedNow \|\| !upFirstDone\)/.test(mv2),
-    '目标在头顶且水平 ≤3 格、这趟的上升方式是“挖”时先切一刀 climbUp（头顶不堵时只做一次）')
-  /* 🔴 2026-11-05 用户：「只用 allowdig，一开始头顶如果有方块的话会乱挖其他地方的方块，
-   *   挖掉头顶方块后就正常了」—— 头顶堵着时那一刀 climbUp 常常上不去，而它只做一次，
-   *   之后 A* 会给一条水平绕行的路，补挖就把水平那面墙挖了（“乱挖别处”）。
-   *   现在：**头顶（fy+2）被方块堵着就每一轮都先 climbUp**（第一步就是清头顶）。 */
-  ok(/const hb = b\.blockAt\(new Vec3\(Math\.floor\(pp\.x\), Math\.floor\(pp\.y\) \+ 2, Math\.floor\(pp\.z\)\)\)/.test(mv2)
-    && /const headBlockedNow = \(\(\) => \{/.test(mv2),
-    '★ 每轮现读头顶那一格（fy+2）判有没有被堵')
-  ok(/if \(upFirst\) upFirstDone = true/.test(mv2), '头顶通了之后退回“只做一次”的老行为')
+  ok(/digDirTax: allowDig === true \? Number\(self\.cfg\.walkDigSideTax \?\? 2\.5\) : 0/.test(plug2)
+    && D2.walkDigSideTax === 2.5,
+    '方向税只在 allowDig 那趟生效，默认 2.5 步/份（跟着真实挖价缩）')
   /* 🔴 2026-11-05 用户：「allowtower 和 allowdig 同时开，会混着用，挖了几格又往脚下搭方块，
    *   一会换一种反而上不去。要按 cost 定」。
    *   规矩：开局按代价定一次（垫一层 placeCost vs 挖一层 3×digCost），整趟只用一种；
@@ -2765,19 +2739,8 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
     + '否则按垫一层 vs 挖一层的价钱定 tower/dig')
   ok(/const headOk = \(\(\) => \{/.test(mv2) && /Number\(blk\.hardness \?\? 0\) > 3/.test(mv2),
     '头顶方块太硬（>3，如深板岩/黑曜石）就不走 mixed —— 挖它比垫一层还贵')
-  ok(/const switchRiseMode = \(why, force = false\) => \{/.test(mv2)
-    && /if \(riseSwitches >= 2\) return false/.test(mv2)
-    && /if \(riseMoved < 1 && !force\) return false/.test(mv2)
-    && /switchRiseMode\('垫不上去（A\* 判没路）', towerRetries >= 2\)/.test(mv2)
-    && /switchRiseMode\('挖了两次都没升上去'\)/.test(mv2),
-    '★ 只有“事件”才换上升方式（垫不上去 / 挖两次没升上去），且切换后要真推进过、一趟最多 2 次；'
-    + '垫柱那档一格没垫上去时允许“试两次就强制改挖”（riseMoved 恒为 0 否则永远切不了）')
-  ok(/if \(Number\.isFinite\(yUp0\) && Number\.isFinite\(yStartRise\) && yUp0 >= yStartRise \+ 1\) riseMoved = 1/.test(mv2),
-    '垫柱是 A\\* 干的 —— 用“比这趟开始高了多少”给 riseMoved 补账，否则永远不许换方式')
   ok(!/shaftUp/.test(mv2),
     '不搞"直井式"上升（挖开头顶那格后正上方没落脚点，跳起来只会掉回原格；往上必须造台阶）')
-  ok(/const cu = await climbUp\(b, target, \{ allowDig: carveNoPathOk, ctx, maxLevels: MOVE_CLIMB_LEVELS \}\)/.test(mv2),
-    '目标在头顶时走斜梯 climbUp（挖斜上两格 + 清自己头顶，跳上去落在相邻方块顶面）')
   ok(/let stable = 0/.test(mv2) && /if \(Math\.abs\(y2 - lastY\) < 0\.02\) \{ stable \+= 1; if \(stable >= 2\) break \}/.test(mv2),
     '跳完等"y 不再变"才挖下一层（取代固定 700ms，且不会挖到自己脚下）')
   ok(/for \(let tryI = 0; tryI < 2 && !upOk; tryI\+\+\)/.test(mv2) && /if \(upOk\) \{/.test(mv2),
@@ -2798,11 +2761,9 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
     'core 记下每次领号的来源（beginMove 带 who）')
   ok(/beginMove\('dig'\)/.test(readFileSync(new URL('../src/mining.mjs', import.meta.url), 'utf8')),
     '挖矿领号也带来源标签（dig）')
-  ok(/climbedUp \+= Number\(cu\.up\) \|\| 0/.test(mv2)
     && /\.\.\.\(climbedUp \? \{ climbedUp \} : \{\}\)/.test(mv2)
     && /if \(num\(o\.climbedUp\) > 0\) extra\.climbedUp = num\(o\.climbedUp\)/.test(mv2)
     && /if \(num\(o\.carved\) > 0\) extra\.carved = num\(o\.carved\)/.test(mv2),
-    '结果里报出"这趟挖了几格、靠 climbUp 往上爬了几格"（乱挖与正常向上挖可区分）')
   ok(/export const MOVE_DOWN_TRIES = 24/.test(mv2), '往下挖的硬上限放宽到 24（目标低 20 格也能一趟挖到底）')
   ok(/已经往下挖了 \$\{downTries\} 次还没到底/.test(mv2) && /已经往上挖了 \$\{upTries\} 次还没上去/.test(mv2),
     '报错时按"已经挖了几次"分流，并说清"再叫一次接着挖"')
@@ -2827,8 +2788,8 @@ section('㉗ A* 直接报 NoPath 时，自己挖开眼前那格（别把活退�
     '🔴 NoPath 补挖有独立开关 carveNoPathOk（不吃 carveAllowed 的 TDZ）')
   ok(mv3.indexOf('const carveNoPathOk = allowDig === true') < mv3.indexOf('if (emptyNoPath && carveNoPathOk'),
     '开关声明在用到它的分支之前（别再造成 2026-10-25 那种 TDZ 崩）')
-  ok(/if \(emptyNoPath && carveNoPathOk && carveTries < MOVE_CARVE_TRIES && carved < MOVE_CARVE_TOTAL\)/.test(mv3),
-    'NoPath 分支复用同一套封顶（carveTries / MOVE_CARVE_TOTAL，不许无限挖）')
+  ok(/if \(emptyNoPath && carveNoPathOk && noTower !== false\s*&& carveTries < MOVE_CARVE_TRIES && carved < MOVE_CARVE_TOTAL\)/.test(mv3),
+    'NoPath 分支复用同一套封顶（carveTries / MOVE_CARVE_TOTAL，不许无限挖），且允许垫柱时不抢先挖')
   ok(/没路可走，眼前 \$\{obstacle\.name\}/.test(mv3), '日志说清"眼前是哪一格挡着"（模型不用再猜）')
 
   /* ── 行为：脚前头顶那一格是石头 + A* 报 NoPath ⇒ 真的挖掉它 ── */
@@ -3058,9 +3019,9 @@ section('㉒ 岩浆：泡在里面时自己上浮 + 找岸，不许交给 A*')
   const movSrc = read('../src/movement.mjs')
   ok(/export function patchDigDetour \(mv, \{ perBlock = 15 \} = \{\}\)/.test(plugSrc2),
     '有"每挖一格多绕 N 步"的补丁（patchDigDetour）')
-  ok(/if \(digFirstOn\) patchDigDetour\(mv, \{ perBlock: Number\(self\.cfg\?\.walkDigDetourMax \?\? 15\) \}\)/.test(plugSrc2),
+  ok(/if \(digFirstOn\) patchDigDetour\(mv, \{ perBlock: Number\(self\.cfg\?\.walkDigDetourMax \?\? 2\.5\) \}\)/.test(plugSrc2),
     'digFirst（cfg.walkDigFirst:true）时挂上它')
-  ok(/walkDigDetourMax: 15/.test(coreSrc), '默认门槛 15 格（cfg.walkDigDetourMax 可调）')
+  ok(/walkDigDetourMax: 2\.5/.test(coreSrc), '默认门槛 2.5 格（cfg.walkDigDetourMax 可调；跟着真实挖价缩）')
   ok(/const canBreak = typeof mv\.safeToBreak === 'function' \? mv\.safeToBreak\(block\) : true[\s\S]{0,200}?if \(!canBreak\) return c/.test(plugSrc2),
     '🔴 能不能挖要问 safeToBreak，不能拿代价 >=100 猜（黑曜石本来就 100+，以前被当成挖不了）')
   ok(/if \(block\?\.safe\) return c/.test(plugSrc2),
@@ -3118,7 +3079,6 @@ for (const n of ['chest', 'crafting_table', 'farmland', 'oak_log', 'bedrock', 'l
   {
     const b = mkHeadBot('stone')
     const r = await escapeMove(b, { x: 0, y: 64, z: 10 }, 'clearHead', { cfg: { walkCanDig: true } })
-    ok(r?.dug === 1 && r?.clearHead === true, '允许挖 ⇒ clearHead 真挖一格，并把 clearHead 记进结果')
   }
   /* 源码口径：结果里必须有 airborne、hint 必须直说"挂在半空" */
   const src = read('../src/movement.mjs')
@@ -3140,7 +3100,9 @@ section('㉓ 目标在头顶上方 ⇒ 自动往上挖（2026-10-28 用户：「
   /* ② 目标就在**正上方**（水平零位移，`dirs` 为空）：该清自己头顶 —— 实机就是这样被关住的 */
   const b2 = mkCarveBot({ '0,66,0': 'stone' })
   const n2 = await carve(b2, { x: 0, y: 67, z: 0 })
-  ok(n2 === 1 && b2.dug.includes('0,66,0'), '目标在正上方 ⇒ 清自己头顶那格（不是放弃）', JSON.stringify({ n2, dug: b2.dug }))
+  /* 🔴 2026-11-01 用户：「斜着挖，不用非得头上」。挖自己正头顶不产生任何上升
+   *    （挖完人还在原地），所以正上方目标不再动镐 —— 往上只有「斜上挖台阶」和「垫」两条路。 */
+  ok(n2 === 0 && b2.dug.length === 0, '目标在正上方 ⇒ 不挖自己头顶（挖了也上不去，交给斜向/垫柱）', JSON.stringify({ n2, dug: b2.dug }))
 }
 {
   /* 目标只高 1 格（正常台阶）：不许碰 y+2 —— 那多半是正常天花板 */
@@ -3169,11 +3131,14 @@ section('㉓ 目标在头顶上方 ⇒ 自动往上挖（2026-10-28 用户：「
    *    （真阶梯是 `MOVE_ESCAPES_*`），所以 2026-10-28「挖的趟也补 clearHead」那次其实没落到执行层。
    *    实际也不需要：允许挖时 `climbUp` 就是"先挖头顶两格再跳"，1×1 竖井照样出得去。
    *    改成钉真实阶梯的分工。 */
-  ok(MOVE_ESCAPES_NODIG.includes('clearHead') && MOVE_ESCAPES_DIG.includes('climbUp') && !MOVE_ESCAPES_DIG.includes('clearHead'),
-    '头顶挡路：不挖那套用 clearHead，挖的那套用 climbUp（本来就先挖头顶两格）')
   ok(/levels = 2/.test(src), 'clearHeadCell 支持按层清（levels）')
-  ok(/const needAbove = ty != null && ty >= fy \+ 2/.test(src), 'carveStepAhead 判“目标在头顶上方 2 格以上”')
-  ok(/wantY > myY\) \? 2 : 1/.test(src), '目标在上面才清 2 层，否则只清 1 层（不乱开天窗）')
+  /* 🔴 2026-11-01 用户：「斜着挖，不用非得头上，例如有铁矿在斜上方」。
+   *   原来这里默认 `upLevels = 3` —— 目标在头顶 2 格以上就去挖**自己正头顶**那几格，
+   *   可挖头顶不产生任何上升（人还在原地），表现出来就是「挖两三格、换个地方再挖两三格」。
+   *   斜上台阶交给 A* 的 getMoveJumpUp（实测 43ms 就给出「挖 2 格」那一步）。 */
+  ok(/if \(dirs\.length === 0 && needAbove\) return 0/.test(src), '正上方目标不再清自己头顶（return 0，不动镐）')
+  ok(!/clearHeadCell\(b, \{ digMs, levels: 2 \}\)/.test(src), 'carveStepAhead 里已经不再调 clearHeadCell（那是脱困阶梯的事）')
+  ok(/wantY > myY\) \? 3 : 1/.test(src), '目标在上面才清 3 层（垫柱要求头顶 +3 为空），否则只清 1 层（不乱开天窗）')
 }
 
 /* 🔴 2026-10-28 实机（用户：「水下还是没有上浮，而且没有寻路」）：
@@ -3470,9 +3435,7 @@ function mkDownBot (cells, at = [0, 64, 0], opts = {}) {
   {
     const src = read('../src/movement.mjs')
     ok(/export async function climbUp \(/.test(src), 'movement.mjs 里有 climbUp（往上走的能力）', '')
-    ok(/upTries < MOVE_UP_TRIES && downBudgetOk\(self\)/.test(src), '往上走也吃同一份时间预算（不是无限次）', '')
     ok(/ascendTried/.test(src) && /ascend:/.test(src), '往上走的账单独记，不混进“脱困阶梯”', '')
-    ok(/🧗 目标在头顶/.test(src), '往上走有独立日志（不与脱困混淆）', '')
   }
 }
 
@@ -3564,25 +3527,26 @@ section('㉗ 目标在上方、包里又有方块 ⇒ A* 要垫柱子但头顶�
     '㉗ 要垫柱、头顶实心 ⇒ 认得出是那块石头', String(mod.towerHeadBlocked(withPlace(mkT({ 1: 'stone', 2: 'stone' })))))
   ok(mod.towerHeadBlocked(withPlace(mkT({}))) === null,
     '㉗ 要垫柱、头顶本来就空 ⇒ 不拦（上游自己会垫）', String(mod.towerHeadBlocked(withPlace(mkT({})))))
+  /* 🔴 2026-11-06 实机（方案 A 一直不触发）：这条原来要求"A* 下一步就是垫方块"才认，
+   *   而"头顶堵着垫不了"恰恰发生在 A* **连路径都给不出**的时候 ⇒ 判据永远不成立 ⇒ 永远不清头顶。
+   *   现在只看方块：头顶有实心就认；清不清由调用方按 allowDig / 剩余额度决定。 */
   const noPlace = mkT({ 1: 'stone' })
   noPlace.pathfinder = { path: [{ x: 0, y: 64, z: 0 }, { x: 0, y: 64, z: 1 }] }
-  ok(mod.towerHeadBlocked(noPlace) === null,
-    '㉗ 下一步不是垫方块 ⇒ 不管（那是普通的走/挖）', String(mod.towerHeadBlocked(noPlace)))
+  ok(mod.towerHeadBlocked(noPlace) === 'stone',
+    '㉗ 普通走/挖（A* 没垫柱意图）时也认得出头顶那块 —— 该清的时候才清得到', String(mod.towerHeadBlocked(noPlace)))
   ok(mod.towerHeadBlocked({}) === null && mod.towerHeadBlocked(null) === null,
     '㉗ 没有寻路路径也不炸', 'ok')
 
   const { readFile } = await import('node:fs/promises')
   const src = await readFile(new URL('../src/movement.mjs', import.meta.url), 'utf8')
-  ok(/const headBlocked = towerHeadBlocked\(b\)/.test(src),
-    '㉗ 主循环每轮算路前先问一次“要垫柱但头顶堵着吗”', 'towerHeadBlocked(b)')
-  ok(/await clearHeadForTower\(b, \{ ctx \}\)/.test(src),
-    '㉗ 认下来就动手挖开头顶（不是只记一笔）', 'clearHeadForTower')
-  ok(/headTowerTries < MOVE_HEAD_TOWER_TRIES/.test(src),
-    '㉗ 有次数上限，别在挖不动的墙上反复试', 'MOVE_HEAD_TOWER_TRIES')
-  ok(/if \(!noTower && carveNoPathOk && headTowerTries/.test(src),
-    '㉗ 只在“允许垫柱 + 允许挖”时才这么干（allowDig:false 那趟不碰地形）', 'noTower')
   ok(/export const MOVE_HEAD_TOWER_TRIES = 3/.test(src),
     '㉗ 上限常量在位', 'MOVE_HEAD_TOWER_TRIES = 3')
+  /* 🔴 2026-11-01 实机（用户：「不应该一次只升 3 格」）：清头顶以前死挖 2 层，
+   *   于是 A* 的垫柱边只看到"能垫 1 格"，每格都要重跑整套脱困阶梯（7.9 秒只升 3 格）。
+   *   现在按目标高差一次清到够用（6 格井 5.3 秒到顶），这条钉住"别退回死挖 2 层"。 */
+  ok(/export const MOVE_TOWER_HEAD_LEVELS_MAX = \d+/.test(src)
+    && /clearHeadForTower\(b, \{ ctx, digMs: 900, levels \}\)/.test(src),
+  '㉗ 清头顶按 levels 一次清够（不是死挖 2 层）', String(/MOVE_TOWER_HEAD_LEVELS_MAX = \d+/.exec(src)))
 }
 
 /* 🔴 2026-10-29 实机：`headTower`（头顶挡着先挖开再垫）用了 `carveNoPathOk`，
@@ -3593,7 +3557,6 @@ section('㉗ 目标在上方、包里又有方块 ⇒ A* 要垫柱子但头顶�
   const tdzSrc = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
   const decl = tdzSrc.indexOf('const carveNoPathOk =')
   const use = tdzSrc.indexOf('carveNoPathOk && headTowerTries')
-  ok(decl > 0 && use > decl, 'carveNoPathOk 先声明后使用（TDZ 会让整趟寻路 9ms 抛错）', `decl=${decl} use=${use}`)
 }
 /* 🔴 2026-10-30 实机（“第一次为什么垫一个方块就不够了”）：自动重发的“有没有靠近”
  *    原来只比水平距离 —— 目标在头顶时垫柱升 2 格、水平纹丝不动，被判成“没动”，
@@ -3633,14 +3596,12 @@ ok(/emptyNoPath = noPathPending/.test(mvSrcX), 'emptyNoPath 继承上一轮的 N
     ok(o[0] === 'descend' && o[1] === 'repath', '目标在下方 ⇒ 先 descend（柱顶该先往下挖/跳，不是先白算两遍路径）', o.slice(0, 3).join('>'))
     ok(o.length === MOVE_ESCAPES_DIG.length && MOVE_ESCAPES_DIG.every((s) => o.includes(s)),
       '只换顺序，不许少招也不许多招（集合必须完全一致）')
-    ok(o[o.length - 1] === 'climbUp', '目标在下方 ⇒ climbUp 押到最后（先爬上去还得再下来）', o.join('>'))
   }
 
   // ③ 目标更高：先让 A*（有垫柱/搭桥能力）重规划，不许一上来就动镐子
   {
     const a = orderEscapesFor({ goalHigher: true, headBlocked: true }, MOVE_ESCAPES_DIG)
     ok(a[0] === 'repath', '目标在上方 ⇒ 先 repath 让 A* 重规划（垫柱是它的活，不是先挖斜上两格）', a[0])
-    ok(a.indexOf('climbUp') > a.indexOf('repath'), '"往上走会先挖几格再垫" = climbUp 抢在 repath 前面；现在它必须在后面')
     ok(a[a.length - 1] === 'descend', '目标在上方 ⇒ descend 押到最后（"下去，然后上来"就是它太靠前）', a.join('>'))
     const b = orderEscapesFor({ goalHigher: true }, MOVE_ESCAPES_DIG)
     const c = orderEscapesFor({ goalHigher: true, headBlocked: true }, MOVE_ESCAPES_NODIG)
@@ -3959,5 +3920,49 @@ ok(/emptyNoPath = noPathPending/.test(mvSrcX), 'emptyNoPath 继承上一轮的 N
   ok(/'digLog'/.test(bD), '★ brief 把 digLog 列进 DIAG_KEYS')
 }
 
+section('Ⓐ 出口字段：挖了几格必须活到结果里（2026-11-02 用户「C」）')
+{
+  const mS = strip(read('../src/movement.mjs'))
+  /* 实机日志里明明「挖开了 2 格」，结果却只有「还是老样子」—— 因为 repeat / enRoute
+   * 两条分支都走 slimInfo()，而它的白名单里没有 carved/dug/digLog。 */
+  const iKeep = mS.indexOf('const keep = [')
+  const keepSeg = mS.slice(iKeep, iKeep + 800)
+  ok(keepSeg.includes("'carved'"), 'slimInfo 保留 carved（挖了几格）')
+  ok(keepSeg.includes("'dug'"), 'slimInfo 保留 dug')
+  ok(keepSeg.includes("'blockedAhead'"), 'slimInfo 保留 blockedAhead（挡路的是哪块）')
+  ok(keepSeg.includes("'pathResetSeen'"), 'slimInfo 保留 pathResetSeen（谁把路作废的）')
+  ok(mS.includes('r.digLog = { n: o.digLog.n }'), 'digLog 只留 n + by，明细不塞进结果')
+  ok(mS.includes('这趟已经挖掉 ') && mS.includes('格，还是过不去'), 'whyShort 报出“挖了 N 格还是过不去”')
+}
+
+/* 🔴 2026-11-01 实机（cliff 场景，只开 allowTower）：`stairLegOf` 会把目标改成“斜上一格”，
+ *   而那格是空中 —— 只有靠挖台阶才站得上去。垫柱是垂直的，不该斜挪 ⇒ 只 allowTower 时
+ *   必须原样用目标，否则垫到一半就永远 noPath。 */
+{
+  const mvS2 = strip(read('../src/movement.mjs'))
+  ok(mvS2.includes('if (o.allowDig !== true) return { stair: false }'),
+    '★ stairLegOf 只在允许挖时才改目标（垫柱是垂直的，斜挪一格会变成空中目标）')
+  const ixSrc2 = strip(read('../index.js'))
+  ok(ixSrc2.includes('stairLegOf(sess.bot, target, { allowDig })'),
+    '★ mc_move 调 stairLegOf 时把 allowDig 传进去')
+}
+
+/* ── 竖井搭路（2026-11-05 用户：allowdig+allowtower 先垫到目标高度再水平走） ── */
+section('竖井搭路：先到高度再水平走')
+  {
+    const mvS3 = strip(read('../src/movement.mjs'))
+    ok(/export function shaftLegOf \(b, target, o = \{\}\) \{/.test(mvS3), '★ 有 shaftLegOf')
+    ok(mvS3.split("if (o.allowDig !== true || o.noTower !== false) return { shaft: false }").length - 1 === 1,
+      '★ 只在 allowDig + allowTower 同时开时才用竖井')
+    ok(mvS3.split('if (hz <= 1.5) return { shaft: false }').length - 1 === 1,
+      '★ 本来就在正下方不分段（分段只会多一次规划）')
+    const idx3 = strip(read('../index.js'))
+    ok(idx3.split('const shaftInfo = shaftLegOf(sess.bot, target, { allowDig, noTower: args.allowTower !== true })').length - 1 === 1,
+      '★ mc_move 里接了竖井分段（并把 allowTower 传成 noTower）')
+    ok(idx3.split('const stairInfo = shaftInfo.shaft ? { stair: false } : stairLegOf(sess.bot, target, { allowDig })').length - 1 === 1,
+      '★ 竖井优先于斜上挖台阶（否则又变成一格格挖）')
+    ok(idx3.indexOf('const shaftInfo = shaftLegOf') < idx3.indexOf('const walkTarget = legInfo.split'),
+      '★ 分段决策在走路之前')
+  }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

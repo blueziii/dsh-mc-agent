@@ -252,7 +252,7 @@ export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) 
        *   加上一个往返（几十~三百毫秒）到服务端时人已经往下掉了 ⇒ 偶发重叠被拒。
        *   0.72 格时人已经完全离开方块那格（方块顶面就是脚底原高度），而且离落地还有约 0.45 秒，
        *   够 RTT 走完。水里浮力小、抬升慢，单独给 0.35。 */
-      const needRise = inWater ? 0.35 : 0.72
+      const needRise = inWater ? 0.35 : 1.0    // 0.72 时身体还没离开自己那格 ⇒ 服务端判重叠、拒放
       const t0 = Date.now()
       let bestRise = -Infinity
       let lastProgress = Date.now()

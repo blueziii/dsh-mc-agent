@@ -482,6 +482,32 @@ export async function digStair (self, {
   const MAX = Math.min(Math.max(1, Math.floor(maxSteps)), 128)
   const blkAt = (x, y, z) => b.blockAt(new Vec3(x, y, z))
 
+  /* 🔴 2026-11-05 用户：「现在还是会后退，效果是之前的更好」。
+   *   进度锚点 `cur` 是 dig stair 唯一的进度量：它一旦被"当前位置"覆盖，目标格就跟着后退，
+   *   表现出来就是"正常挖一段，然后回头挖两格"。
+   *   规矩改成：**只许朝目标方向前进** —— 跨层要朝 up 的方向；同层要沿 dir 往前；
+   *   反向 / 原地 / 取到空中坐标 一律不采纳。
+   *   （这不是"判失败太严"：失败时本来就不该动锚点。） */
+  const aheadOk = (from, to) => {
+    if (!to || !Number.isFinite(to.x) || !Number.isFinite(to.y) || !Number.isFinite(to.z)) return false
+    const dy = Number(to.y) - Number(from.y)
+    if (up ? dy > 0 : dy < 0) return true
+    if (dy !== 0) return false
+    const fwd = d.x !== 0
+      ? (Number(to.x) - Number(from.x)) * Math.sign(d.x)
+      : (Number(to.z) - Number(from.z)) * Math.sign(d.z)
+    return fwd > 0
+  }
+  let curBack = 0
+  const adoptCur = (to) => {
+    if (aheadOk(cur, to)) { cur = to; return true }
+    curBack++
+    if (curBack <= 2) {
+      notes.push(`↩ 这一步的结果（${to?.x ?? '?'},${to?.y ?? '?'},${to?.z ?? '?'}）不在前进方向上 —— 不采纳，继续从 ${cur.x},${cur.y},${cur.z} 挖`)
+    }
+    return false
+  }
+
   /* 🔴 2026-11-05 用户：「dig stair 现在周围有空气就不挖，应该找最近的墙往上挖」。
    *   原来方向是固定的：正前方脚下是空的（矿洞/大洞）就判 `no-floor` 收工 ——
    *   可人明明站在岩体里，左边右边后面都是墙。
@@ -566,7 +592,7 @@ export async function digStair (self, {
         )
         if (w2?.arrived !== true) notes.push(`⚠ 没走到那格：${w2?.hint ?? w2?.reason ?? '没给原因'}`)
       } catch (e) { notes.push(`⚠ 走过去抛错：${e?.message ?? e}`) }
-      cur = b.entity.position.floored()
+      adoptCur(b.entity.position.floored())
       return true
     }
     /* 剩余时间不够走一步 ⇒ 直接收工成 budget（不再让 walkTo 越过预算边界后误判 stuck） */
@@ -688,7 +714,7 @@ export async function digStair (self, {
       if (stoodH && stayedHere) {
         steps++
         if (up && nowH.y < cur.y) notes.push(`⬇ 这一步没上去，反而从 y=${cur.y} 掉到 y=${nowH.y}`)
-        cur = nowH
+        adoptCur(nowH)
         continue
       }
       if (stoodH && !stayedHere) {
@@ -738,7 +764,7 @@ export async function digStair (self, {
     /* 🔴 2026-11-05（用户：「stair 为什么一直会后退」）：原来是 `cur = now` —— 每一步失败都把进度锚点
      *   改写成“人的真实位置”。锚点一退，下一步的目标格就跟着退 ⇒ 越挖越往回走（正反馈）。
      *   现在：**锚点只前进**（只有真成功才更新），失败一律不动。 */
-    if (ok) cur = now
+    if (ok) adoptCur(now)
     if (!ok) {
       /* 🔴 2026-11-05 实机（用户：「如果 dig stair 没跳上去会后退」「dig stair 现在挖着挖着会换位置挖」）：
        *   跳失败最常见的副作用是人被顶开一两格。这里试过“先走回原位再试同一格”，但**实机证明这更糟**：
@@ -778,7 +804,7 @@ export async function digStair (self, {
         }
       } catch (e) { hopWhy = String(e?.message ?? e) }
       now = await settleGround(b, 400)
-      if (now.x === fx && now.z === fz && stoodOk()) { cur = now; continue }
+      if (now.x === fx && now.z === fz && stoodOk()) { adoptCur(now); continue }
       /* 已经到目标高度了就别报卡住：`y` 到了就算这一趟干完了（用户 2026-10-29：「它挖到地表了，然后就报了」） */
       if (up ? now.y >= ty : now.y <= ty) { reason = 'done'; break }
       reason = 'stuck'

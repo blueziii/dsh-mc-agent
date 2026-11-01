@@ -966,7 +966,7 @@ const digFirstOn = digFirst === true
   /* 🔴 2026-10-27（用户：「nodig false 最短现在会挖家，ai 也没意识到要切换，设置个绕路最大
    *   限制大于 15 格在挖」）—— 光压 `digCost` 等于"挖一格 ≈ 走一步"，A* 会挖穿自家墙地板。
    *   每挖一格再记 `walkDigDetourMax`（默认 15）步 ⇒ 绕 15 格以内不挖，超过才挖。 */
-  if (digFirstOn) patchDigDetour(mv, { perBlock: Number(self.cfg?.walkDigDetourMax ?? 15) })
+  if (digFirstOn) patchDigDetour(mv, { perBlock: Number(self.cfg?.walkDigDetourMax ?? 2.5) })
   mv.scafoldingBlocks = scaffoldingItemIds(b)      // 背包里能垫的方块（**item id**，见该函数注释）
   /* 🔴 2026-10-30：搭桥收进 A* 之后，"垫一格"的额外代价（vendor `getMoveForward` 里读）。
    *    默认 5 ⇒ 走一格 1、垫一格 6+；平地绝不会铺，沟边才比"绕 5 格"划算。
@@ -982,7 +982,7 @@ const digFirstOn = digFirst === true
     digPenalty: (digFirstOn || !preferDoors) ? 0 : Number(self.cfg.doorDigPenalty ?? 8),
     parkourPenalty: Number(self.cfg.walkParkourPenalty ?? 4),
     /* 只有"允许挖"那趟才收方向税；不许挖那趟压根没有 toBreak 边，收了也没意义。 */
-    digDirTax: allowDig === true ? Number(self.cfg.walkDigSideTax ?? 15) : 0,
+    digDirTax: allowDig === true ? Number(self.cfg.walkDigSideTax ?? 2.5) : 0,
   })
   /* 2026-10-22 用户实机：「现在寻路会踩在岩浆块上掉血」—— 站上去会掉血的地板加点重罚，让它绕开。
    * 为什么光有 `blocksToAvoid` 不够，见 `patchHarmfulFloorMoves` 的注释（那名单管"能不能站"，

@@ -588,8 +588,10 @@ section('🧱 放置确认的三条硬要求（变体、放置前状态、跳跃
 {
   const ps2 = readFileSync(new URL('../src/place.mjs', import.meta.url), 'utf8')
   const psLF = ps2.replace(/\r\n/g, '\n')
-  ok(/const needRise = inWater \? 0\.35 : 0\.72/.test(ps2),
-    '★ 抬升窗口提前到 0.72 格（0.95 太靠顶点，包到服务端时人已下落 ⇒ 偶发重叠被拒）')
+  /* 2026-11-01 实机（1×1 石柱往上垫）：0.72 仍然抬得太低 —— 人脚离地 0.72 格时身体还在
+   * 自己那格的碰撞箱里，往那格放方块 = 与玩家重叠 ⇒ 服务端拒。1.0 才真正离开那格。 */
+  ok(/const needRise = inWater \? 0\.35 : 1\.0/.test(ps2),
+    '★ 抬升窗口是 1.0 格（人脚必须完全离开自己那格，否则与碰撞箱重叠被拒）')
   ok(/那格现在是 \$\{at\?\.name/.test(ps2) && /那格里站着/.test(ps2),
     '★ 放置失败时把现场摊开（那格现在是什么 / 离它多远 / 手上什么 / 那格有没有实体）')
   ok(/else \{\n\s+lastErr = e\n\s+\}/.test(psLF),

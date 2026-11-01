@@ -413,11 +413,11 @@ ok(/allowDig: s\.allowDig !== undefined \? s\.allowDig === true : s\.noDig === f
   'mc_sequence 的 move 步骤默认也不挖（和 mc_move 一致，老字段 noDig:false 仍认）')
 /* 2026-10-27（用户：「把 mode swim 去掉」）：swim 分支删了，现在只剩 walk 这一条出口。 */
 ok(/allowDig,[^}]*?noTower: args\.allowTower !== true[^}]*?intent: intentArgOf\(args\.intent\)/.test(mcIndexSrc)
-  && countOf(mcIndexSrc, 'walkWithAutoDig(sess, target,') === 1,
+  && countOf(mcIndexSrc, 'walkWithAutoDig(sess, walkTarget,') === 1,
   'allowDig 传进了走路调用（walk 那条；swim 分支已删）')
 /* 2026-10-25（用户：「move和dig如果没办法到那格应该自动切换成可破坏」）：
  *   walk 那条改走 `walkWithAutoDig` —— 先不挖走一遍，走不通自动改成挖穿挡路方块再走。 */
-ok(/walkWithAutoDig\(sess, target, \{ allowDig, noTower: args\.allowTower !== true/.test(mcIndexSrc),
+ok(/walkWithAutoDig\(sess, (?:walkTarget|target), \{ allowDig, noTower: args\.allowTower !== true/.test(mcIndexSrc),
   'walk 走自动挖穿兜底（walkWithAutoDig）')
 /* 🔴 2026-11-02 审计：以前传的是 `allowDig !== true` ⇒ 显式写 `allowDig:false` 也被当成"没给"、
  *   走不通就自己改成挖穿（关掉的开关被绕过）。现在只有**压根没给开关**才允许自动挖穿。 */
@@ -452,8 +452,14 @@ ok(/budgetPlan: \{ totalMs: total, trialMs: total/.test(mcIndexSrc),
 ok(countOf(mvSrc, 'allowDig = false, xz = false } = {}, ctx = {})') === 3,
   'walkToUnguarded / walkToOnce / walkPathfinder 三个函数都收 allowDig（连 xz 一起逐层转发）',
   String(countOf(mvSrc, 'allowDig = false, xz = false } = {}, ctx = {})')))
-ok(countOf(mvSrc, 'if (allowDig !== true) mv') === 2,
-  '新建 Movements 处都关掉 canDig（出厂 / 地形重估；垫柱那处随 towerFallback 一起删了）', String(countOf(mvSrc, 'if (allowDig !== true) mv')))
+/* 🔴 2026-11-01 用户：「单 allowTower 完全不许挖，包括头顶」。
+ *   以前要求垫柱档必须放开 `canDig`（理由写在旧断言里：怕 safeToBreak 首行让垫柱边全灭）——
+ *   实机证明那是错的：`getMoveUp` 本身不挖，放开 canDig 只会让 A* 顺手把头顶/侧面挖掉
+ *   （竖井里"只走 / 单 tower 也挖 2 格"就是这么来的，cliff/tower 关掉 canDig 后仍能垫到顶）。
+ *   现在两处新建 Movements 一律 `canDig = carveNoPathOk`：只有 allowDig 才放开 A* 的挖边。 */
+ok(countOf(mvSrc, '.canDig = carveNoPathOk') >= 2 && countOf(mvSrc, '.canDig = false') >= 1,
+  '新建 Movements 处都按 allowDig 决定 canDig（单 allowTower 不许挖；垫柱边自己不挖，放开只会乱挖）',
+  String(countOf(mvSrc, '.canDig = carveNoPathOk')))
 ok(/const carveAllowed = allowDig === true &&/.test(mvSrc), '卡住时"挖开台阶"的补救也因 allowDig 关掉')
 
 /* 🔴 2026-10-30 守门：一个概念只能有一个名字。
@@ -527,7 +533,8 @@ section('传送门：只给 x/z 也要能进')
 const movSrc = existsSync(join(PF_DIR, 'lib', 'movements.js')) ? readFileSync(join(PF_DIR, 'lib', 'movements.js'), 'utf8') : ''
 ok(!/^\s*if \(toBreak\.length > 0\) return$/m.test(movSrc), 'vendor 里已经没有"要挖就整条判死"')
 ok(/cost \*= \(Number\.isFinite\(f\) && f > 0\) \? f : 3/.test(movSrc), 'vendor 里按挖价乘系数（默认 3）')
-ok(/if \(cost > 100\) return/.test(movSrc), '乘完之后仍然守住 cost>100 的不可行线')
+ok(/if \(!Number\.isFinite\(cost\)\) return/.test(movSrc) && !/if \(cost > 100\) return/.test(movSrc),
+  '乘完之后用 Infinity（不可破）判不可行，不用 100 阈值（累计代价本来就会超 100）')
 ok(/mv\.digDownFactor = Number\(self\.cfg\?\.walkDigDownFactor \?\? 3\)/.test(plugSrc),
   'plugins 把 digDownFactor 接到 cfg（walkDigDownFactor）')
 ok(/this\.digDownFactor \?\? 3/.test(patchSrc), '补丁写进 vendor 的是实例字段 digDownFactor，缺省 3')

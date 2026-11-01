@@ -58,29 +58,29 @@ export const TERRAIN_TEXT = {
  */
 export const TERRAIN_PROFILES = {
   // 平地：就是 `src/plugins.mjs` 原本那套全局值（别的分类都从它出发）
-  flat: { maxDropDown: 3, liquidCost: 4, digCost: 4, placeCost: 12, allowParkour: false },
+  flat: { maxDropDown: 3, liquidCost: 4, digCost: 0.6, placeCost: 2.5, allowParkour: false },
   // 台阶：挖穿比绕远快（一格台阶绕路要好几步），所以挖便宜一点；但**别开跳远** ——
   // 延迟下 parkour 落地判定很容易摔（`walkAllowParkour` 默认关的原因）
-  steps: { maxDropDown: 3, liquidCost: 4, digCost: 3, placeCost: 10, allowParkour: false },
+  steps: { maxDropDown: 3, liquidCost: 4, digCost: 0.45, placeCost: 2.1, allowParkour: false },
   // 落差：把"允许往下跳"收窄到 2 格；垫方块放宽（垫一格比摔下去便宜），挖更贵（挖了脚下可能塌）
   // 2026-10-30：**开跑酷** —— 柱林/断崖之间"跨 1~2 格"正是跑酷边能生成的走法，
   //   以前全档关掉，A* 在这里必然 NoPath，只能靠兜底一格一格试（用户：「智能规划路线，不要兜底」）。
   //   开是安全的：落点要实心 + 上方两格净空（vendor `getMoveParkourForward` 自己检查），
   //   再加 `parkourPenalty`（默认 4）⇒ 只在"省下的路 > 4 步"时才选。
-  drops: { maxDropDown: 2, liquidCost: 6, digCost: 5, placeCost: 8, allowParkour: true },
+  drops: { maxDropDown: 2, liquidCost: 6, digCost: 0.75, placeCost: 1.7, allowParkour: true },
   // 沟/缺口：更不想下水（掉进去常常出不来，`walkSwim` 只保证"游到附近"）；
   // 垫方块比平地（12）便宜一点，但**不能是全表最便宜的** —— 2026-10-17 实机（要塞里）：
-  // 地形判成 gap、`placeCost = 4` 让寻路器一路往脚下垫柱子（`pillared: 11`），其中一次放置
+  // 地形判成 gap、`placeCost = 1.7` 让寻路器一路往脚下垫柱子（`pillared: 11`），其中一次放置
   // 被服务端拒（vendor `index.js:563` 的 `place_error`），**那一刻人已经在半空** ⇒ 从 y=68
   // 掉到 y=47。垫方块的代价里必须算上"垫失败 = 摔下去"，所以抬到 8（= `drops`）：仍比平地
   // 便宜，但比挖一格（5）贵 —— 沟边更倾向绕路 / 挖台阶，真要过去就用 `mc_act {mode:"bridge"}`。
-  gap: { maxDropDown: 2, liquidCost: 8, digCost: 5, placeCost: 8, allowParkour: true },
+  gap: { maxDropDown: 2, liquidCost: 8, digCost: 0.75, placeCost: 1.7, allowParkour: true },
   // 危险地形（岩浆/火/仙人掌/细雪）：一格都别往下跳、水一滴都别碰、挖穿更贵（挖开可能放出岩浆）
-  hazard: { maxDropDown: 1, liquidCost: 20, digCost: 8, placeCost: 8, allowParkour: false },
+  hazard: { maxDropDown: 1, liquidCost: 20, digCost: 1.2, placeCost: 1.7, allowParkour: false },
   // 窄道：挖更贵（挖了容易把自己埋了 / 掉下去），垫方块稍微放宽（贴墙走不动时垫一格）
-  narrow: { maxDropDown: 2, liquidCost: 4, digCost: 5, placeCost: 10, allowParkour: true },
+  narrow: { maxDropDown: 2, liquidCost: 4, digCost: 0.75, placeCost: 2.1, allowParkour: true },
   // 判不出来（区块没加载 / 没 bot）：退回平地那套
-  unknown: { maxDropDown: 3, liquidCost: 4, digCost: 4, placeCost: 12, allowParkour: false },
+  unknown: { maxDropDown: 3, liquidCost: 4, digCost: 0.6, placeCost: 2.5, allowParkour: false },
 }
 
 /** 档案字段 → 用户配置键（`profileFor` 用它们判断"用户是不是显式设过"）。 */

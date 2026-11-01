@@ -323,7 +323,8 @@ const GOTO = join(PF_DIR, 'lib', 'goto.js')
 function repIn (file, oldText, newText, label) {
   const txt = readFileSync(file, 'utf8')
   const eol = txt.includes('\r\n') ? '\r\n' : '\n'
-  const n = newText.split('\n').join(eol)
+  /* 2026-11-01：newText 也允许是字符串数组（多行补丁写成数组更好读，不用拼 + NL）。 */
+  const n = (Array.isArray(newText) ? newText.join('\n') : newText).split('\n').join(eol)
   if (txt.includes(n)) { console.log(`  = ${label}（已打过）`); return }
   /* 2026-10-30：`oldText` 可以是**数组** —— 同一个补丁可能有多种"旧状态"
    *（原始 upstream / 老版本补丁），任一命中即可。补丁被改写过之后重跑要认得出。 */
@@ -442,6 +443,57 @@ rep(
   '垫方块：已预装备就不再重复 equip'
 )
 
+repIn(
+  join(PF_DIR, 'index.js'),
+  ['    placing = false\n    pathUpdated = false',
+    "    placing = false\n    pathUpdated = false\n    /* 2026-11-01 DSH 补丁（用户：「只跳不垫，从挖转到垫有延迟，明明已经在跳了」）：\n     *   上面把 digging/placing 复位了，但没有松开按下的控制键 ⇒ 人一直蹦、落地不稳 ⇒\n     *   下一次放方块又被拒 ⇒ 再超时 ⇒ 永久“只跳不垫”。重置路径就松干净，谁要动下一轮重按。 */\n    try { for (const k of [\"jump\", \"sprint\", \"forward\", \"back\", \"left\", \"right\"]) bot.setControlState(k, false) } catch (e) {}"],
+  "    placing = false\n    pathUpdated = false\n    /* 2026-11-01 DSH 补丁（用户：「只跳不垫，从挖转到垫有延迟，明明已经在跳了」）：\n     *   上面把 digging/placing 复位了，但没有松开按下的控制键 ⇒ 人一直蹦、落地不稳 ⇒\n     *   下一次放方块又被拒 ⇒ 再超时 ⇒ 永久“只跳不垫”。重置路径就松干净，谁要动下一轮重按。 */\n    try { for (const k of [\"jump\", \"sprint\", \"forward\", \"back\", \"left\", \"right\"]) bot.setControlState(k, false) } catch (e) {}",
+  '重置路径时松掉所有控制键（只跳不垫 / 挖完转垫有延迟）',
+)
+/* 2026-11-01 实机：垫柱一直 place_error，但没人说得出“凭什么被拒”。
+ *   把现场记进 bot.__mcPlaceErr（那格现在是什么 / 离多远 / 手上什么 / 附近有谁 / 原始报错），
+ *   外层（movement.mjs 的垫柱认账日志）就能如实报出来，而不是“垫不上”三个字。 */
+repIn(
+  join(PF_DIR, 'index.js'),
+  [
+      "              .catch(_ignoreError => {",
+      "                resetPath('place_error')",
+      "              })",
+    ]
+  ,
+  [
+      "              .catch((_ignoreError) => {",
+      "                /* 2026-11-01 实机：垫柱一直 place_error，但没人说得出“凭什么被拒”。",
+      "                 *    把现场记进 bot.__mcPlaceErr，外层就能如实报给模型，而不是“垫不上”三个字。 */",
+      "                try {",
+      "                  const _pb = placingBlock",
+      "                  const _now = bot.blockAt(new Vec3(_pb.x, _pb.y, _pb.z), false)",
+      "                  const _pc = new Vec3(_pb.x + 0.5, _pb.y + 0.5, _pb.z + 0.5)",
+      "                  const _ents = []",
+      "                  try {",
+      "                    for (const _e of Object.values(bot.entities || {})) {",
+      "                      if (!_e || _e === bot.entity || !_e.position) continue",
+      "                      if (Math.abs(_e.position.x - _pc.x) < 1.3 && Math.abs(_e.position.y - _pc.y) < 2.3 && Math.abs(_e.position.z - _pc.z) < 1.3) {",
+      "                        _ents.push(String(_e.name || _e.username || _e.type) + '@' + _e.position.x.toFixed(1) + ',' + _e.position.y.toFixed(1) + ',' + _e.position.z.toFixed(1))",
+      "                        if (_ents.length >= 3) break",
+      "                      }",
+      "                    }",
+      "                  } catch (e5) {}",
+      "                  bot.__mcPlaceErr = {",
+      "                    cell: _pb.x + ',' + _pb.y + ',' + _pb.z,",
+      "                    now: _now ? _now.name : null,",
+      "                    held: bot.heldItem ? bot.heldItem.name : null,",
+      "                    dist: Number(bot.entity.position.distanceTo(_pc).toFixed(2)),",
+      "                    onGround: bot.entity.onGround === true,",
+      "                    ents: _ents,",
+      "                    err: String((_ignoreError && _ignoreError.message) ? _ignoreError.message : _ignoreError).slice(0, 100)",
+      "                  }",
+      "                } catch (e4) {}",
+      "                resetPath('place_error')",
+      "              })",
+    ],
+  'place_error 时记下现场（垫柱为什么放不上）',
+)
 repIn(
   join(PF_DIR, 'lib', 'goto.js'),
   `    function pathStopped () {

@@ -300,12 +300,18 @@ section('12. 每步预算跟着剩余时间走（时间到 ≠ 卡住）+ 前方
   ok(/let geo0 = stepGeometryOf\(b, target, \{ cells \}\)/.test(mvS), 'geo0 可被合成（不再是 const）')
   ok(/standY: ty2,[\s\S]{0,80}canStandOnTop: true/.test(mvS), '合成的台阶几何把落脚高度设成目标格本身')
 
-  /* ② 锚点只前进：失败时绝不把 cur 改成人的真实位置（那就是“一直后退”）。 */
-  ok(/if \(ok\) cur = now/.test(mnS), '★ 锚点只前进（成功才更新）')
-  /* 注意：注释里也写着 `cur = real`（解释为什么删掉它），所以只能钉“缩进后的真代码行”。 */
-  ok(!/\n\s*cur = real\s*\r?\n/.test(mnS)
-    && (mnS.match(/\n\s*cur = b\.entity\.position\.floored\(\)\s*\r?\n/g) || []).length === 1,
-    '失败时不再把锚点改成真实位置（只剩“走到墙位后重新取锚点”那一处对的）')
+  /* ② 锚点只前进：`cur` 只在“朝目标方向前进”时才更新（`aheadOk` 守门），
+   *    失败 / 反向 / 原地 / 空中坐标一律不采纳 —— 否则目标格会跟着后退。
+   *    2026-11-05 用户：「现在还是会后退，效果是之前的更好」⇒ 从“成功才更新”收紧成“前进才更新”。 */
+  ok(/const aheadOk = \(from, to\) =>/.test(mnS), '★ 有 aheadOk 守门（只许朝目标方向前进）')
+  ok(/if \(up \? dy > 0 : dy < 0\) return true/.test(mnS), '★ 跨层要朝 up 的方向')
+  ok(/if \(ok\) adoptCur\(now\)/.test(mnS), '★ 锚点只前进（成功且过 aheadOk 才更新）')
+  ok((mnS.match(/\n\s*adoptCur\(b\.entity\.position\.floored\(\)\)\s*\r?\n/g) || []).length === 1
+    && !/\n\s*cur = b\.entity\.position\.floored\(\)\s*\r?\n/.test(mnS)
+    && !/\n\s*cur = real\s*\r?\n/.test(mnS)
+    && !/\n\s*cur = now\s*\r?\n/.test(mnS)
+    && !/\n\s*cur = nowH\s*\r?\n/.test(mnS),
+    '失败时不再把锚点改成真实位置（只剩“沿 dir 走到墙位”那一处，也要过 aheadOk）')
   ok(/没走回原位[\s\S]{0,200}下一步仍然按原锚点算/.test(mnS), '走不回原位时如实说出来，并向模型保证不会跟着退')
 
   /* ③ 高度对了还不够：跳上旁边一格不算这一步。 */

@@ -246,8 +246,8 @@ section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做
     '★ 垫柱边不再被「cost > 100」一票否决（头顶要挖 ≠ 走不通）')
   ok(/block2\.boundingBox !== 'empty' && !block2\.liquid && !this\.safeToBreak\(block2\)\) return/.test(up),
     '头顶是真挖不动（基岩/保护格/容器）才 return —— 判据是「能不能挖」，不是「贵不贵」')
-  ok(/cost > 1000\) return/.test(up),
-    '末尾仍留一个「贵到没意义」的上限（1000 ≈ 绕 1000 步，别让 A* 去探天价路径）')
+  ok(/cost > 1000\) return/.test(up) === false && /!Number\.isFinite\(cost\)\) return/.test(up),
+    '成本哨兵统一成「只有 Infinity（不可破）才放弃」，不再用 100 / 1000 这种阈值')
   ok(/toPlace\.push\(\{ x: node\.x, y: node\.y - 1, z: node\.z/.test(up),
     '垂直垫一格仍是唯一那条垫柱边（斜垫 2026-10-29 就禁了，别偷偷回来）')
 }
@@ -289,5 +289,9 @@ const vIdxWhy = readFileSync(join(VN, 'mineflayer-pathfinder', 'index.js'), 'utf
 ok(/const riseMin = Number\(bot\.pathfinder\.placeMinRise/.test(vIdxWhy), '★ 用 placeMinRise 当门槛')
 ok(/canPlace = riseBest >= riseMin && riseNow >= riseMin/.test(vIdxWhy), '★ 离地够高就放')
 ok(!vIdxWhy.includes('yNowP >= placingBestY - 0.08'), '★ 不再要求“顶点 ±0.08”（窗口太窄会一直等不到）')
+ok(/for \(const k of \['jump', 'sprint', 'forward', 'back', 'left', 'right'\]\) bot\.setControlState\(k, false\)/.test(vIdxWhy),
+  '★ 重置路径时松掉所有控制键（否则“只跳不垫”：digging 复位了但 jump 还按着）')
+ok(vIdxWhy.indexOf('for (const k of [') < vIdxWhy.indexOf("bot.emit('path_reset', reason)") + 4000,
+  '松键发生在 resetPath 里（不是别处）')
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败项'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

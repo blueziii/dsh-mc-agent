@@ -23,17 +23,23 @@ export function startDigAudit (bot) {
     const orig = bot?.dig
     if (typeof orig !== 'function') return null
     const log = []
+    /* 取**两层**帧：`digOneGuarded`（movement.mjs:2660）是所有入口的共同汇合点，
+     * 只记一层的话谁都显示成它，等于没记（2026-11-01 实机踩过：全部 digBy 都是
+     * `movement.mjs:2660`，分不清是 breakAhead 还是 clearHead 挖的）。 */
     const callerOf = () => {
       try {
         const st = String(new Error().stack ?? '').split('\n')
-        for (let i = 2; i < st.length && i < 8; i++) {
+        const frames = []
+        for (let i = 2; i < st.length && i < 14 && frames.length < 2; i++) {
           const m = /([\w.\-\\/]+\.(?:mjs|js)):(\d+):(\d+)/.exec(st[i])
           if (!m) continue
           const f = m[1].split(/[\\/]/).pop()
-          /* 跳过包装层自己 */
-          if (f === 'dig-audit.mjs') continue
-          return `${f}:${m[2]}`
+          /* 跳过包装层自己（测试脚本也会包一层 bot.dig 记数） */
+          if (f === 'dig-audit.mjs' || f === 'live-move-test.mjs') continue
+          const tag = `${f}:${m[2]}`
+          if (frames[frames.length - 1] !== tag) frames.push(tag)
         }
+        if (frames.length) return frames.join('<-')
       } catch {}
       return 'unknown'
     }

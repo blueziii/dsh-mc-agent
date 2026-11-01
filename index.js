@@ -33,7 +33,7 @@ import { raceAbort } from './src/async-util.mjs'
 import { McBot, lossless, logLine, logDebug, logOnce, logLevel, libraryInfo, CALL_MS, callBudget, redactPath } from './src/core.mjs'
 import { defineTool, toolDefKind, loosenNumberParams, coerceNumberArgs } from './src/tool-def.mjs'
 import { inWaterNow } from './src/world-observer.mjs'
-import { briefMoveOf, briefMoveTextOf } from './src/movement.mjs'
+import { briefMoveOf, briefMoveTextOf, farLegOf, shaftLegOf, stairLegOf } from './src/movement.mjs'
 /* 路线图第 ⑥ 条：把每个动作的结局说清（已确认成功 / 动作失败 / 结果未知）。纯函数，不碰游戏状态。 */
 import { outcomeOf, verdictText } from './src/task-runner.mjs'
 import { runText } from './src/task-exec.mjs'
@@ -4250,7 +4250,31 @@ export function apply(ctx, rawConfig) {
        *   而且唯一那句"改成挖穿过来的"只在 `hint` 里，模型看不到）。
        *   现在：只有**压根没给挖开关**才允许这一遍自动挖穿；给了（true/false）就照给的来。 */
       const digGiven = args.allowDig !== undefined || args.noDig !== undefined
-      return finish(withOutcome(await walkWithAutoDig(sess, target, { allowDig, noTower: args.allowTower !== true, noBridge: args.allowBridge !== true, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }, args.budgetMs, !digGiven), { expect: 'moved' }))
+      /* 🔴 2026-11-01 用户：「mc_move 一次总共只有 10 秒，不用一次就到那么远，给定个上限」（定 50 格）。
+       *   超过 50 格就只走到朝目标方向 50 格处能站的地方，结果里报 remaining。
+       *   目的：A* 的搜索空间随距离爆炸，长途目标常常 6 秒还算不出路 ⇒ 规划吃掉整个预算 ⇒
+       *   表现为"10 秒只挪 2 格"。切段之后每次规划几十毫秒，剩下的时间才用来走。 */
+      /* 分段规则的优先级：
+       *   ① 挖 + 垫都开着、目标又在斜上方 ⇒ 先「竖井搭路」垫到目标高度（垫柱一格一格往上最快）
+       *   ② 只开挖 ⇒ 「斜上挖台阶」一层一层来（A* 一次只算一步，43ms）
+       *   ③ 其余 ⇒ 按 50 格距离切段 */
+      const shaftInfo = shaftLegOf(sess.bot, target, { allowDig, noTower: args.allowTower !== true })
+      const stairInfo = shaftInfo.shaft ? { stair: false } : stairLegOf(sess.bot, target, { allowDig })
+      const legInfo = shaftInfo.shaft
+        ? { split: true, shaft: true, leg: shaftInfo.leg, remaining: shaftInfo.remaining }
+        : stairInfo.stair
+          ? { split: true, stair: true, leg: stairInfo.leg, remaining: stairInfo.remaining }
+          : farLegOf(sess.bot, target)
+      const walkTarget = legInfo.split ? legInfo.leg : target
+      if (legInfo.split) logLine(`mc_move 长途分段：${JSON.stringify(target)} → 这一程 ${walkTarget.x},${walkTarget.y},${walkTarget.z}（还差 ${legInfo.remaining} 格）`)
+      const walkRes = await walkWithAutoDig(sess, walkTarget, { allowDig, noTower: args.allowTower !== true, noBridge: args.allowBridge !== true, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }, args.budgetMs, !digGiven)
+      if (legInfo.split && walkRes && typeof walkRes === 'object') {
+        walkRes.legTo = `${walkTarget.x},${walkTarget.y},${walkTarget.z}`
+        walkRes.remaining = legInfo.remaining
+        walkRes.goal = `${target.x},${target.y},${target.z}`
+        walkRes.hint = `还差 ${legInfo.remaining} 格才到目标（这一程走到 ${walkRes.legTo}）—— 同一个目标再叫一次，我会接着走下一程。` + (walkRes.hint ? ' ' + walkRes.hint : '')
+      }
+      return finish(withOutcome(walkRes, { expect: 'moved' }))
     },
   }))
 
