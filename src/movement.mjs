@@ -4759,6 +4759,21 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
    *    原来全仓只有 `GoalNear` 一种 goal ⇒ AI 想"去那一带"必须编一个 y，
    *    编高了 A* 就老老实实垫方块往上爬（"搭路搭到空气里"），编低了就 `NoPath`。
    *    `GoalXZ` 让"到那一列"本身就是目标，y 由 pathfinder 自己决定怎么下去/怎么上去。 */
+  /* 🔴 2026-11-03 用户 m04247「让 A* 不敢"到附近就算到"」：
+   *   病灶（实机 `🪜 A* 说到了，但垂直还差 4.0 格（水平 0.6）—— 推一轮`）：
+   *   `sp.y` 这个落点可能被 `standPointFor` 挪到"人够得着的那一层"，
+   *   于是交给 A* 的目标变成"走到那一列的地面" —— 垂直差 4~12 格它照样 resolve，
+   *   `getMoveUp`（垫柱边）永远不被选中，我们只好在 `vertStuck` 里手工补。
+   *   ⇒ **垂直差超过该 intent 的 `vertTol` 时，把 goal 的 y 锁成目标真实 y、半径收到 0**，
+   *   逼 A* 要么垫柱/挖台阶真上去，要么如实 NoPath。
+   *   `near` 的语义保留在"到达判定"里（水平到位就算到），只是不再拿它当 A* 的终点。 */
+  if (!xz && !gp.portal) {
+    const tyReal = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
+    const curY = Number(b?.entity?.position?.y)
+    if (tyReal != null && Number.isFinite(curY) && Math.abs(curY - tyReal) > vertTol) {
+      gp = { ...gp, y: tyReal, radius: 0, tightenedY: true }
+    }
+  }
   /* 命中传送门时不能再用 GoalXZ（它只锁水平两维）—— 得升级成三维精确格，人才能站进去。 */
   const GoalXZ = (xz && !gp.portal) ? goals?.GoalXZ : null
   let goal = GoalXZ
@@ -5773,7 +5788,42 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   而 `d32dac0`（无条件抢跑）实测 dy=12 到顶、不乱挖。
    *   ⇒ 回到无条件抢跑。"空通道与 A* 抢跑冲突"那件事要另找判据（不能用"是否被埋"）。
    *   两个判据先留着变量，下次挑更硬的判据（比如"正上方 3 格全实心"）时再用。 */
-  if (attempt === 0 && carveNoPathOk && noTower !== false) {
+  /* 🔴 2026-11-03 用户 m04280「单 dig 在有空隙的能不能像 dig+tower 在空隙那样」：
+   *   判据换成**"朝目标方向本来就有现成通道吗"**（比 `deepBuried` 硬，不会被"挖了两格出现空洞"骗到）：
+   *     · 目标正上方（sx=sz=0）：+1、+2 都是空的 ⇒ 能靠跳/垫上去 ⇒ 交给 A*（竖井里 +2 是 stone ⇒ 自己挖）；
+   *     · 目标有水平分量：朝目标方向第 1、2 格的**脚位+头位都空** ⇒ 现成通道 ⇒ 交给 A*。
+   *   ⇒ 实心岩体（竖井/实心对角）仍自己挖台阶；预制通道/天然洞穴一律先让 A* 走空隙。 */
+  const openToward = (() => {
+    try {
+      const p = b?.entity?.position
+      if (!p) return false
+      const fx = Math.floor(p.x); const fy = Math.floor(p.y); const fz = Math.floor(p.z)
+      const tx = Math.floor(Number(target?.x)); const tz = Math.floor(Number(target?.z))
+      if (!Number.isFinite(tx) || !Number.isFinite(tz)) return false
+      const sx = Math.sign(tx - fx) || 0; const sz = Math.sign(tz - fz) || 0
+      const solid = (dx, dy, dz) => {
+        const q = b?.blockAt?.(new Vec3(fx + dx, fy + dy, fz + dz))
+        return Boolean(q) && q.boundingBox === 'block'
+      }
+      if (sx === 0 && sz === 0) return !solid(0, 1, 0) && !solid(0, 2, 0)
+      const walkable = (k) => !solid(sx * k, 0, sz * k) && !solid(sx * k, 1, sz * k)
+      return walkable(1) && walkable(2)
+    } catch { return false }
+  })()
+  /* 🔴 2026-11-03 用户 m04325「有空隙斜挖，dig+tower 会一卡一卡的，很明显」——
+   *   抬挖价（×5）本来是为了"能垫就别挖"，代价是 A* 里"挖"与"垫"的代价差拉大 ⇒ 要展开更多节点，
+   *   每次都顶满 `thinkTimeout` 同步算好几秒（人站着不动 = 肉眼"一卡一卡"）。
+   *   有空隙（`openToward`：朝目标第 1/2 格脚+头都空，或正上方 +1/+2 都空）时根本不需要抬价 ——
+   *   用正常价，搜索变量便宜、算得快；只有"朝目标实心/被埋住"时才 ×5 让垫柱优先。 */
+  if (noTower === false) {
+    try {
+      const mm = b?.pathfinder?.movements
+      if (mm && Number.isFinite(Number(mm.__mcBaseDigCost))) {
+        mm.digCost = Number(mm.__mcBaseDigCost) * (openToward ? 1 : MOVE_TOWER_DIG_COST_MUL)
+      }
+    } catch { /* 假 bot */ }
+  }
+  if (attempt === 0 && carveNoPathOk && noTower !== false && !openToward) {
     const tyLv = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
     const fyLv = Math.floor(Number(b?.entity?.position?.y))
     if (tyLv != null && tyLv - fyLv >= 1) {
@@ -5809,12 +5859,20 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   reset 才会涨）。可 A* 在实心岩体里挖的是 toBreak 里的**侧面**格子，一次都没试垫柱 ⇒
    *   `placeFails` 永远是 0 ⇒ 头顶那格从来没人挖 ⇒ 人卡在原地、旁边的方块挖了一个又一个。
    *   这里在"还差 2 格以上要往上"时，每轮先保证头顶净空（+1/+2/+3），挖不到东西才去让 A* 垫。 */
+  /* 🔴 2026-11-03 用户 m04347「快到的时候还是卡了」：卡点是这几行反复出现
+   *   `⛏ 垫柱要头顶净空 —— 先把头顶挖开 1/2 格` → 重算 A* → 又清 → 又重算（每轮 1~2 秒）。
+   *   ⚠️ 试过"一次清到目标净空（levels = 高差+1）"与"有空隙时不清"—— **两个都反噬**
+   *   （`shaft/dig+tower` dy=12→6、`diag2-up/dig+tower` 对角 14.1→3.2）：一次挖 8 格要 12 秒，预算全花在清头顶。
+   *   ⇒ 保持每轮最多 3 格，只按**剩余预算**限幅（紧的时候只清 1 格，别把整趟预算花在头顶）。 */
   if (attempt === 0 && noTower === false) {
     const tyLvP = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
     const fyLvP = Math.floor(Number(b?.entity?.position?.y))
     if (tyLvP != null && tyLvP - fyLvP >= 2) {
+      const leftP = (() => { try { return Number(self?.callLeft?.()) } catch { return Number.NaN } })()
+      const capP = Number.isFinite(leftP) ? Math.max(1, Math.floor((leftP - 1_500) / 1_200)) : 3
+      const levelsP = Math.max(1, Math.min(3, MOVE_TOWER_HEAD_LEVELS_MAX, capP))
       let headN = 0
-      try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: 3 }) } catch { headN = 0 }
+      try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: levelsP }) } catch { headN = 0 }
       if (headN > 0) {
         if (!planTried.includes('clearHeadTower')) planTried.push('clearHeadTower')
         self.log(`⛏ 垫柱要头顶净空 —— 先把头顶挖开 ${headN} 格（挖旁边没用，垫不上去），再去垫`)
@@ -5934,13 +5992,23 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
                   })()
                   if (pf && roomOk) {
                     let su = null
-                    try { su = await stepUp(b, new Vec3(pf.x, pf.y + 1, pf.z), { allowDig: false, ctx }) } catch { su = null }
+                    try { su = await stepUp(b, new Vec3(pf.x, pf.y + 1, pf.z), { allowDig: false, ctx }) } catch (e) { su = { __err: e?.message ?? String(e) } }
                     if (su?.ok === true) {
                       if (!planTried.includes('placeSelf')) planTried.push('placeSelf')
                       self.log('🧱 只差垂直 —— 头顶已经空了，自己垫一格上去（不等 A* 生成垫柱边）')
                       attempt = 0
                       continue
                     }
+                    /* 用户 2026-11-02：「先加诊断：把 stepUp 在这里的失败原因打出来（是"跳不上"还是"放被拒"）」。
+                     *   stepUp 的返回形态：`{ tried, ok, why, blockedBy? }`，
+                     *   `why='no-step'` = 连起跳几何都算不出；`why='wall'` = 上不去且不让挖；
+                     *   `why='no-rise'` = 跳了但没升高；`why='no-land'` = 上去了没落到目标格。 */
+                    self.log(`🔎 自己垫一格没成：${JSON.stringify({
+                      tried: su?.tried ?? null,
+                      why: su?.why ?? null,
+                      blockedBy: su?.blockedBy ?? null,
+                      err: su?.__err ?? null,
+                    })}（站在 ${pf.x},${pf.y},${pf.z}，头顶 y+1/y+2 都是空的）`)
                   }
                 }
                 self.log('🪜 A* 说到了，但垂直还差 ' + Math.abs(dyR).toFixed(1) + ' 格（水平 ' + horizR.toFixed(1) + '）—— 推一轮，让往上/往下的动作试着挪一层')

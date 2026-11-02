@@ -4011,16 +4011,21 @@ section('通审：计数、口径、开关、预算')
      *    目标那一层，再交回 A* 走水平段。 */
     /* ⚠️ 2026-11-02 用户：「单 dig 现在乱挖了」⇒ `buriedNow || blockedToward` 这两个门**已撤回**：
      *    实心岩体里一挖就出现空洞 ⇒ `deepBuried` 立刻 false ⇒ 交给 A* ⇒ A* 在 1×1 竖井里挖侧面绕路
-     *    （实测 `shaft/dig` dy=3、横漂 9 格）；无条件抢跑实测 dy=12 到顶。两个判据的变量先留着。 */
-    ok(/if \(attempt === 0 && carveNoPathOk && noTower !== false\) \{/.test(mvT)
+     *    （实测 `shaft/dig` dy=3、横漂 9 格）；无条件抢跑实测 dy=12 到顶。两个判据的变量先留着。
+     * 🔴 2026-11-03 用户 m04280「单 dig 在有空隙的能不能像 dig+tower 那样」⇒ 换成硬判据 `openToward`：
+     *    "朝目标方向本来就有现成通道吗"（正上方 +1/+2 都空，或朝目标第 1/2 格脚+头都空）
+     *    ⇒ 有通道交给 A*（走空隙），实心（竖井/实心对角）才自己挖台阶。 */
+    ok(/if \(attempt === 0 && carveNoPathOk && noTower !== false && !openToward\) \{/.test(mvT)
       && !/noTower !== false && \(buriedNow \|\| blockedToward\)\) \{/.test(mvT)
+      && /const openToward = /.test(mvT)
+      && /if \(sx === 0 && sz === 0\) return !solid\(0, 1, 0\) && !solid\(0, 2, 0\)/.test(mvT)
+      && /const walkable = \(k\) => !solid\(sx \* k, 0, sz \* k\) && !solid\(sx \* k, 1, sz \* k\)/.test(mvT)
       && /const buriedNow = /.test(mvT)
       && /const blockedToward = /.test(mvT)
-      && /solid\(sx \* 2, 0, sz \* 2\) && solid\(sx \* 2, 1, sz \* 2\)/.test(mvT)
       && /planTried\.push\('climbToLevel'\)/.test(mvT)
       && /planTried\.push\('stepDownToLevel'\)/.test(mvT),
       '★ dig 档分两段：先 climbUp/stepDown 到目标那一层（climbToLevel / stepDownToLevel），再水平挖过去；' +
-      '且只在「被埋住 或 朝目标第 1/2 格脚+头全实心」时才抢（有空隙的地方交给 A*，别两边打架）')
+      '且只在「朝目标方向没有现成通道」（openToward 为假）时抢（有空隙的地方交给 A*，别两边打架）')
     ok(/export function deepBuried \(b\) \{/.test(mvT),
       '★ deepBuried 导出：四周含头顶 +2 全是实心（实心岩体里被埋住）')
     ok(!/\.thinkTimeout\s*=/.test(mvT),
