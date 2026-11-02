@@ -26,6 +26,7 @@ import { isAir, isLiquid, isPassable, isSolidBlock, isTreeBlock, isTreeLog, isLe
 import { BRIDGE_FATAL, heldSnapshotOf, restoreHeldOf } from './bridge.mjs'
 import { classifyTerrainCached } from './terrain.mjs'
 import { recoverFromWater } from './water-recovery.mjs'
+import { scaffoldingItemIds } from './place-items.mjs'
 import { lavaEscape } from './lava-recovery.mjs'
 /* 🔴 2026-10-16 审计（P1，四类耗时）：`goto` 这一段的墙钟**几乎全是"等寻路"** ——
  *    把它上报给性能监测，`mc_move` 才不会在 `perf` 里显示成"慢得可疑、要不要搬 Worker"。
@@ -4712,8 +4713,11 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
     const gx0 = Math.floor(Number(sp.x)); const gy0 = Math.floor(Number(sp.y)); const gz0 = Math.floor(Number(sp.z))
     const baseY = standableY(b, gx0, gy0, gz0)
     if (noTower) {
-      /* 没开 allowTower：垫不上去。保持老行为（交给 A*），但日志里说清是“半空、不是没路”。 */
-      self.log(`⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空、脚下没依附面 —— 没开 allowTower，垫不上去`)
+      /* 没开 allowTower：垫不上去。保持老行为（交给 A*），但日志里说清是“半空、不是没路”。
+       * 🔴 2026-11-02 用户（dig 档实机）：「一直在挖旁边的方块，头顶那个又没挖」——
+       *   原文案写成「没开 allowTower，垫不上去」，读起来像"这趟没救了"，
+       *   而 dig 档本来就不垫、靠挖上去 ⇒ 改成说清"继续挖"。 */
+      self.log(`⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空、脚下没依附面 —— 这趟不垫柱（allowTower 关着），继续挖着往上`)
     } else if (Number.isFinite(baseY) && baseY < gy0 && canStandAtWorld(b, gx0, baseY, gz0)) {
       padBase = { x: gx0, y: baseY, z: gz0 }
       padGoalObj = { x: gx0, y: gy0, z: gz0 }
@@ -5087,12 +5091,25 @@ const applyRiseMode = () => {
      *   现在两条边都按各自的开关交给 A*，由它按代价自己挑；
      *   riseMode 只影响**我们自己的 climbUp 先不先用**。 */
     m.allow1by1towers = towerAllowed
+    /* 🔴 2026-11-02 用户（实机）：「挖了以后一直在跳，是不是没方块了」——**是**。
+     *   `scafoldingBlocks` 只在建 Movements 那一刻按**当时的背包**算一次（`plugins.mjs`
+     *   `mv.scafoldingBlocks = scaffoldingItemIds(b)`），之后挖出来的圆石进了背包也不会生效
+     *   ⇒ A* 眼里"没有垫料" ⇒ 永远不生成垫柱边，只剩跳（`getMoveJumpUp`）⇒ 原地一跳一跳。
+     *   这里每次 `applyRiseMode()`（每趟 walkTo 开头 + 切上升方式后）按当前背包重算。 */
+    try {
+      const sc = scaffoldingItemIds(b)
+      if (Array.isArray(sc)) m.scafoldingBlocks = sc
+    } catch { /* 假 bot */ }
     /* 🔴 2026-11-01 用户（「a得是有 allowdig 才可以挖，单 allowtower 不可以」→「完全不许挖，
      *   包括头顶」）：A* 的挖边**只认 allowDig**。以前这里是 `carveNoPathOk || towerAllowed`，
      *   理由是"垫柱边 getMoveUp 要求头顶那格可挖" —— 代价是单开 allowTower 时 A* 手里有挖边，
      *   随时可能为了垫柱把头顶/侧面的方块挖掉。现在不挖了：垫柱在头顶实心的洞里给不出边，
      *   A* 就如实报没路（用户接受），要挖请显式 allowDig:true。 */
     m.canDig = carveNoPathOk
+    /* 🔴 2026-11-02 试过（已撤）：dig+tower 上升阶段把 A* 的挖边关掉（「只垫不挖」）。
+     *   实测反噬：`shaft/dig+tower` 与 `diag2s-up/dig+tower` 双双变成 `dy=0` + 全 `noPath`
+     *   —— 垫柱边本身就要求"看得见头顶 +2/+3 净空"，挖边一关，A* 连推演都做不出来。
+     *   ⇒ 回到 `canDig = carveNoPathOk`；"上升阶段乱挖"只能靠"清头顶 → 垫"的**顺序**治。 */
     /* 🔴 2026-11-05 用户：「我看现在 allowtower 和 allowdig 还是会先挖」——
      *   A* 手里“挖一格 + 跳”（getMoveJumpUp，2~3 格 × digCost 0.6 ≈ 1.5~2 分）
      *   比“垫一层”（placeCost 2.5 分）**还便宜** ⇒ 能挖的地方它一律先挖，垫柱排不上。
@@ -5355,6 +5372,14 @@ const switchRiseMode = (why, force = false) => {
   let kicked = 0
 let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换来位移）   // “目标被重设”导致的原地续跑次数（不算失败）
     let attempt = planFrom
+  /* 🔴 2026-11-02 用户（单 dig 竖井实机）：「它直接挖到顶以后走过去往下挖了」——
+   *   实测 `shaft/dig` 的 `dugAt` 高度序列是 `72→74→77→73→71`、水平还一路漂（-104→-99→-96），
+   *   全部来自 vendor A* 的 `toBreak`（`index.js:636`）⇒ climbUp 一旦失败一次就落到 `goto`，
+   *   A* 就在竖井里"挖侧面绕路"，把人带下来又带歪。
+   *   ⚠️ 试过（已撤）：让 climbUp 一直负责（去掉 `attempt === 0`，失败继续重试）。
+   *   实测反噬：`shaft/dig` 变成 dy=3（climbUp 单次成功率低，连续重试把 10 秒预算烧光）。
+   *   ⇒ 这条只能用在"climbUp 成功率高"的场景，暂时保留原来的 `attempt === 0`。 */
+  let climbToLevelTries = 0
     /* 🔴 2026-10-31 实机（柱顶 `mc_move {x:23,y:64,z:93}`，18~66 毫秒就返回、moved:0）：
      *   vendor 的 `goto` 补丁（2026-10-24）把 noPath 从“resolve 空路径”改成了 **reject NoPath**，
      *   而 DSH 侧所有兜底（上台阶 / 往下走 / 往上挖 / 挖开挡路 / 搭桥）全挂在 `emptyNoPath`
@@ -5383,7 +5408,12 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
        *   从没触发过清头顶 ⇒ 头顶还是实心，人原地空跳到预算用完。
        *   垫柱失败就当成"净空不够"，先清一次头顶再重算（最多清到额度用完，与 noPath 分支共用额度）。 */
       if (placeFails > 0 && placeFails > placeFailsCleared && noTower === false
-        && Date.now() - t0 < budget - 1_500) {
+        && Date.now() - t0 < budget - 1_500
+        /* 🔴 2026-11-02 用户实机（dig+tower）：「一直挖头顶方块，**就算是水平挖**」——
+         *   平走/平挖时 A* 手里也有垫柱边，偶尔试一次垫柱就会 `place_no_rise`；
+         *   把它当"净空不够"去清 y+1/y+2/y+3 纯属白挖（水平走根本用不到）。
+         *   ⇒ 只有**目标确实在上方 2 格以上**（真要垫柱往上）才清头顶。 */
+        && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 2) {
         placeFailsCleared = placeFails
         const headN = await towerHeadClearOnce()
         if (headN > 0) {
@@ -5397,8 +5427,11 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
       /* 方案 A（2026-11-06 用户：「不挖是指不挖台阶」，清头顶换净空是允许的）：
        *   A* 第一次报 noPath 就先清自己头顶那 1~2 格 —— 垫柱边要求 +2/+3 空，
        *   竖井上方全实心时它生成不出来。清完立刻重算，垫柱就能一层层上。
-       *   整趟最多 2 次；单 allowTower（不许挖）时函数内部直接返回 0；**不碰挖台阶**。 */
-      if (emptyNoPath) {
+       *   整趟最多 2 次；单 allowTower（不许挖）时函数内部直接返回 0；**不碰挖台阶**。
+       * 🔴 2026-11-02 用户实机（dig+tower）：「一直挖头顶方块，**就算是水平挖**」——
+       *   原来 noPath 一来就清头顶，可**水平/往下走**根本不需要净空 ⇒ 平挖一路白挖 y+2/y+3。
+       *   ⇒ 只有目标确实在上方 2 格以上才清。 */
+      if (emptyNoPath && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 2) {
         if (process.env.MC_MOVE_DEBUG) self.log(`🔎 诊断：emptyNoPath=true（attempt=${attempt}，headTowerTries=${headTowerTries}，tower=${noTower === false}，dig=${carveNoPathOk}）`)
         const headN = await towerHeadClearOnce()
         if (headN > 0) {
@@ -5615,7 +5648,17 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
          *   ⇒ 全程 `NoPath`，`diag2-up/dig+tower` 对角只走了 1.4 格。
          *   预算按挖价缩放：挖价 0.6 时 `digUnit = 20`，与原来**完全一样**。 */
         const digUnit = Math.max(20, Math.ceil((Number(mv?.digCost) || 0.6) * 8 + 12))
-        const rS = Math.max(32, Math.min(900, Math.ceil(dS) * digUnit + 20))
+        /* 🔴 2026-11-02 用户：「move 一次一共就 10s，有必要给那么多范围吗」——没有。
+         *   10 秒里挖着走最多推进十几格（一格实挖 0.4~1.5 秒），预算给到 600+ 分
+         *   等于允许 A* 绕 70 步，它就会在实心岩体里把半径几十格的空间全展开 ⇒ 撞 thinkTimeout
+         *   一个节点都没算出来（`path-reset(3554ms)`，人一格不动）。
+         *   按**这次调用还剩多少时间**封顶：每秒给 26 分（≈3 步挖），10 秒 ⇒ 260，5 秒 ⇒ 130。
+         *   宁可让它"早一点承认搜不到"，立刻落到脱困阶梯/两段式上去，也别把预算烧在搜索里。 */
+        const leftSearchMs = (() => { try { return Number(self?.callLeft?.()) } catch { return Number.NaN } })()
+        const capByTime = Number.isFinite(leftSearchMs)
+          ? Math.max(120, Math.min(260, Math.round(leftSearchMs / 1000 * 26)))
+          : 260
+        const rS = Math.max(32, Math.min(capByTime, Math.ceil(dS) * digUnit + 20))
         if (b.pathfinder) b.pathfinder.searchRadius = rS
         if (mv) mv.searchRadius = rS
       } catch { /* 假 bot / 没有 pathfinder */ }
@@ -5698,17 +5741,51 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   原因：斜上边一步要挖 4 格、代价 17~43（平走只要 8），搜索空间爆炸。
    *   dig 档（不许垫柱）没必要让 A* 硬搜"斜着挖"这事 —— climbUp 本来就会挖斜上台阶，
    *   这里还差 2 格以上时直接让它往上爬一层，爬到目标那一层再交回 A* 走水平段。 */
+  /* 🔴 2026-11-02 用户：「空的双斜挖，因为有空隙，垂直挖一直会和 A* 的寻路冲突」——
+   *   预制通道 / 天然洞穴里 A* 本来就有路可走，我们却抢在它前面 `climbUp` ⇒
+   *   两边同时动、互相打断（A* 在走、我们在挖台阶，谁也没走完）。
+   *   ⇒ 只有**人整个被岩体埋住**（头顶 +2 与四邻全是实心块，见 `deepBuried`）
+   *   才抢在 A* 前面；有现成空间的地方一律先交给 A*（它擅长这个）。 */
+  const buriedNow = (() => { try { return deepBuried(b) } catch { return false } })()
+  /* 光看"被埋"不够：实心岩体里挖掉两格后四邻就出现空洞，`deepBuried` 立刻变 false，
+   *   而前面明明还是厚岩体（A* 依旧算不完，`diag2s-up/dig` 会退化成 dy=2）。
+   *   ⇒ 再补一条"**朝目标方向前进第 1、2 格的脚位+头位全实心**"= 眼前是墙、必须自己挖；
+   *   空通道（预制对角通道/天然洞穴）这两组不成立 ⇒ 老老实实交给 A*。 */
+  const blockedToward = (() => {
+    try {
+      const p = b?.entity?.position
+      if (!p) return false
+      const fx = Math.floor(p.x); const fy = Math.floor(p.y); const fz = Math.floor(p.z)
+      const tx = Math.floor(Number(target?.x)); const tz = Math.floor(Number(target?.z))
+      if (!Number.isFinite(tx) || !Number.isFinite(tz)) return false
+      const sx = Math.sign(tx - fx) || 0; const sz = Math.sign(tz - fz) || 0
+      if (sx === 0 && sz === 0) return false
+      const solid = (dx, dy, dz) => {
+        const q = b?.blockAt?.(new Vec3(fx + dx, fy + dy, fz + dz))
+        return Boolean(q) && q.boundingBox === 'block'
+      }
+      return solid(sx, 0, sz) && solid(sx, 1, sz) && solid(sx * 2, 0, sz * 2) && solid(sx * 2, 1, sz * 2)
+    } catch { return false }
+  })()
+  /* ⚠️ 2026-11-02 撤回（用户：「单 dig 现在乱挖了」）：上面 `buriedNow` / `blockedToward` 这两个门
+   *   **暂时不用**。实心岩体里一挖就出现空洞 ⇒ `deepBuried` 立刻 false ⇒ dig 档被交给 A*，
+   *   A* 在 1×1 竖井里就"挖侧面绕路"（实测 `shaft/dig` dy=3、横漂 9 格）；
+   *   而 `d32dac0`（无条件抢跑）实测 dy=12 到顶、不乱挖。
+   *   ⇒ 回到无条件抢跑。"空通道与 A* 抢跑冲突"那件事要另找判据（不能用"是否被埋"）。
+   *   两个判据先留着变量，下次挑更硬的判据（比如"正上方 3 格全实心"）时再用。 */
   if (attempt === 0 && carveNoPathOk && noTower !== false) {
     const tyLv = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
     const fyLv = Math.floor(Number(b?.entity?.position?.y))
-    if (tyLv != null && tyLv - fyLv >= 2) {
+    if (tyLv != null && tyLv - fyLv >= 1) {
       let up0 = null
       try { up0 = await climbUp(b, target, { allowDig: true, ctx, maxLevels: 1 }) } catch { up0 = null }
       if (up0?.ok === true || Number(up0?.climbed) > 0) {
+        climbToLevelTries = 0                                // 真升上去了 ⇒ 额度归零
         if (!planTried.includes('climbToLevel')) planTried.push('climbToLevel')
         self.log(`🧗 目标还在上方 ${tyLv - fyLv} 格 —— 先挖台阶上到目标那一层，再水平挖过去`)
         continue
       }
+      climbToLevelTries++                                   // 没升上去：下一轮还试（别落给 A* 横向乱挖）
     }
     /* 🔴 2026-11-02（用户：「别忘了挖下挖也是这样」）—— 往下同一条路：先挖斜下台阶下到目标那一层，
      *   再交回 A* 水平挖过去。原来每轮只等 A* 用满 thinkTimeout（`diag2s-down/dig` 3 次 25 秒、
@@ -5727,6 +5804,24 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   实测反噬：`diag2s-up/dig+tower` 每趟变成 `path-reset(1254ms)`，A* **根本没算完**就放弃，
    *   垫柱路径一次都拿不到（3 次 30 秒只升 2 格）。垫柱边要 `remainingBlocks` 推演，
    *   1.2 秒不够；这里保持产品默认（`src/plugins.mjs` 里 3500）。 */
+  /* 🔴 2026-11-02 用户（dig+tower）：「一直在挖旁边的方块，然后头顶那个又没挖，隔着挖后面的了」。
+   *   原因：垫柱上升阶段要不要清头顶，原来只挂在 `placeFails` 计数上（`place_no_rise` 等
+   *   reset 才会涨）。可 A* 在实心岩体里挖的是 toBreak 里的**侧面**格子，一次都没试垫柱 ⇒
+   *   `placeFails` 永远是 0 ⇒ 头顶那格从来没人挖 ⇒ 人卡在原地、旁边的方块挖了一个又一个。
+   *   这里在"还差 2 格以上要往上"时，每轮先保证头顶净空（+1/+2/+3），挖不到东西才去让 A* 垫。 */
+  if (attempt === 0 && noTower === false) {
+    const tyLvP = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
+    const fyLvP = Math.floor(Number(b?.entity?.position?.y))
+    if (tyLvP != null && tyLvP - fyLvP >= 2) {
+      let headN = 0
+      try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: 3 }) } catch { headN = 0 }
+      if (headN > 0) {
+        if (!planTried.includes('clearHeadTower')) planTried.push('clearHeadTower')
+        self.log(`⛏ 垫柱要头顶净空 —— 先把头顶挖开 ${headN} 格（挖旁边没用，垫不上去），再去垫`)
+        continue
+      }
+    }
+  }
   const work = b.pathfinder.goto(goal)
       work.catch(() => {})                         // race 可能先结束：别让它变成"未处理拒绝"（会炸宿主）
       // `ctx.watchOpts` 是给离线测试注入假时钟用的（不然一套断言要真等 2.4 秒 × 4 轮）
@@ -5805,6 +5900,49 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
               if (canVert && vertTries < MOVE_VERT_TRIES) {
                 vertTries++
                 if (!planTried.includes('vertStuck')) planTried.push('vertStuck')
+                /* 🔴 2026-11-02 用户实机（dig+tower）：「垫了几层不动好几秒…到了水平位置后还会挖头顶」——
+                 *   走到"就在目标列、只差垂直 N 格"这一步时，A* 每次都 resolve（GoalNear 是三维球），
+                 *   我们只是"推一轮"再 goto ⇒ 口袋里没有任何能往上挪的动作 ⇒ 每秒一轮耗到预算，
+                 *   而垫柱边要求头顶 +2/+3 净空、头顶实心时永远给不出边。
+                 *   ⇒ 差 ≥2 格且这趟能垫柱时，**先清头顶净空再推**（一次清够，别一格一格磨）。 */
+                if (noTower === false && dyR >= 2 && Date.now() - t0 < budget - 1_500) {
+                  try {
+                    const headN = await towerHeadClearOnce()
+                    if (Number(headN) > 0) {
+                      carved += Number(headN)
+                      if (!planTried.includes('clearHeadTower')) planTried.push('clearHeadTower')
+                      self.log(`⛏ 就差垂直 ${Math.abs(dyR).toFixed(1)} 格 —— 先把头顶挖开 ${headN} 格净空，再垫上去`)
+                      attempt = 0
+                      continue
+                    }
+                  } catch { /* 清头顶失败就退回"推一轮" */ }
+                }
+                /* 🔴 2026-11-02 用户（dig+tower 竖井）：「挖到目标格以后就一直跳不会垫了」——
+                 *   实测（`MC_SCAF_DEBUG`/`MC_MOVEUP_DEBUG`）：垫料 256 个、A* 手里清单 [35]、
+                 *   头顶 y+1/y+2 都已经是 air，可 A* 仍只 resolve、我们只"推一轮"
+                 *   ⇒ 原地跳 8 次（`🔁 走不动了 → 第 3 步：跳跃脱困` 连打），一格不升。
+                 *   ⇒ 头顶净空够、只差垂直的时候，**我们自己垫一格**（stepUp 自带"跳起来放到脚下"），
+                 *   不再指望 A* 生成垫柱边。 */
+                if (noTower === false && dyR >= 1 && Date.now() - t0 < budget - 1_200) {
+                  const pf = (() => { try { return b.entity.position.floored() } catch { return null } })()
+                  const roomOk = (() => {
+                    try {
+                      const a1 = b.blockAt(pf.offset(0, 1, 0))
+                      const a2 = b.blockAt(pf.offset(0, 2, 0))
+                      return Boolean(a1) && Boolean(a2) && a1.boundingBox !== 'block' && a2.boundingBox !== 'block'
+                    } catch { return false }
+                  })()
+                  if (pf && roomOk) {
+                    let su = null
+                    try { su = await stepUp(b, new Vec3(pf.x, pf.y + 1, pf.z), { allowDig: false, ctx }) } catch { su = null }
+                    if (su?.ok === true) {
+                      if (!planTried.includes('placeSelf')) planTried.push('placeSelf')
+                      self.log('🧱 只差垂直 —— 头顶已经空了，自己垫一格上去（不等 A* 生成垫柱边）')
+                      attempt = 0
+                      continue
+                    }
+                  }
+                }
                 self.log('🪜 A* 说到了，但垂直还差 ' + Math.abs(dyR).toFixed(1) + ' 格（水平 ' + horizR.toFixed(1) + '）—— 推一轮，让往上/往下的动作试着挪一层')
                 attempt++
                 continue

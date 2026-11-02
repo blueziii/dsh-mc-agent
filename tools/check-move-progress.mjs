@@ -4009,14 +4009,28 @@ section('通审：计数、口径、开关、预算')
      *    move dig+tower 垂直挖垫到水平格，然后水平挖过去」。实心岩体里 A* 每趟都用满 thinkTimeout
      *    再 path-reset（人不动），所以 dig 档还差 2 格以上时直接让 climbUp/stepDown 先把人送到
      *    目标那一层，再交回 A* 走水平段。 */
+    /* ⚠️ 2026-11-02 用户：「单 dig 现在乱挖了」⇒ `buriedNow || blockedToward` 这两个门**已撤回**：
+     *    实心岩体里一挖就出现空洞 ⇒ `deepBuried` 立刻 false ⇒ 交给 A* ⇒ A* 在 1×1 竖井里挖侧面绕路
+     *    （实测 `shaft/dig` dy=3、横漂 9 格）；无条件抢跑实测 dy=12 到顶。两个判据的变量先留着。 */
     ok(/if \(attempt === 0 && carveNoPathOk && noTower !== false\) \{/.test(mvT)
+      && !/noTower !== false && \(buriedNow \|\| blockedToward\)\) \{/.test(mvT)
+      && /const buriedNow = /.test(mvT)
+      && /const blockedToward = /.test(mvT)
+      && /solid\(sx \* 2, 0, sz \* 2\) && solid\(sx \* 2, 1, sz \* 2\)/.test(mvT)
       && /planTried\.push\('climbToLevel'\)/.test(mvT)
       && /planTried\.push\('stepDownToLevel'\)/.test(mvT),
-      '★ dig 档分两段：先 climbUp/stepDown 到目标那一层（climbToLevel / stepDownToLevel），再水平挖过去')
+      '★ dig 档分两段：先 climbUp/stepDown 到目标那一层（climbToLevel / stepDownToLevel），再水平挖过去；' +
+      '且只在「被埋住 或 朝目标第 1/2 格脚+头全实心」时才抢（有空隙的地方交给 A*，别两边打架）')
     ok(/export function deepBuried \(b\) \{/.test(mvT),
       '★ deepBuried 导出：四周含头顶 +2 全是实心（实心岩体里被埋住）')
     ok(!/\.thinkTimeout\s*=/.test(mvT),
       '★ 移动层不许自己改 pathfinder.thinkTimeout（实测压到 1.2 秒 A* 算不完垫柱边，人反而一格不动）')
+    /* ⑦ 用户 2026-11-02：「move 一次一共就 10s，有必要给那么多范围吗」——
+     *    searchRadius 是"代价预算"，给太大就等于允许 A* 绕几十步，实心岩体里会扩散到超时。 */
+    ok(/const capByTime = Number\.isFinite\(leftSearchMs\)/.test(mvT)
+      && /Math\.max\(120, Math\.min\(260, Math\.round\(leftSearchMs \/ 1000 \* 26\)\)\)/.test(mvT)
+      && !/Math\.min\(900, Math\.ceil\(dS\) \* digUnit \+ 20\)/.test(mvT),
+      '★ searchRadius 按剩余时间封顶（10 秒 ⇒ ≤260 分），不许再按目标距离无上限放大')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

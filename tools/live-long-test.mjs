@@ -283,6 +283,18 @@ async function walkMulti (tgt, mo, maxCalls = 3) {
       r = await MC.walkTo(tgt, { budget: Math.min(SEG * 1000, 10_500), arrive: 1.0, intent: 'stand', ...mo })
     } catch (e) { err = e?.message || String(e) }
     const p = posOf()
+    /* 用户 2026-11-02：「allowdig+allowtower 垫竖井的时候，挖到目标格以后就一直跳不会垫了」
+     *   ⇒ 垫柱边只在"手里有垫料"时才生成（`mv.scafoldingBlocks`）。这里把 A* 手里那份清单、
+     *   背包垫料总数、allow1by1towers/canDig 一起打出来（`MC_SCAF_DEBUG=1` 才打）。 */
+    if (process.env.MC_SCAF_DEBUG) {
+      try {
+        const mvs = MC.bot?.pathfinder?.movements
+        const cnt = (MC.bot?.inventory?.items?.() ?? [])
+          .filter((it) => /cobblestone|dirt|netherrack/.test(it.name))
+          .reduce((a, it) => a + (it.count || 0), 0)
+        console.log(`   [scaf] 清单=[${(mvs?.scafoldingBlocks || []).join(',')}] 背包垫料=${cnt} allow1x1=${mvs?.allow1by1towers} canDig=${mvs?.canDig} placeCost=${mvs?.placeCost}`)
+      } catch (e) { console.log('   [scaf] 读取失败', e?.message ?? e) }
+    }
     let dugAt = []
     /* B 方案：连**谁挖的**（两层栈帧）一起带走 —— 只按坐标统计分不出是 A* 还是我们自己的
        清头顶/挖台阶在重复挖同一格。 */
@@ -531,6 +543,9 @@ const CASES = [
   ['dig-block', caseDigBlock],
   ['tunnel/只走', () => caseMoveTunnel('只走', MOVES[0][1])],
   ['tunnel/dig', () => caseMoveTunnel('dig', MOVES[1][1])],
+  /* 用户 2026-11-02：「allowdig+allowtower 有一直挖头顶方块的现象，就算是水平挖」——
+   *   水平 + dig+tower 这条路以前**从来没测过**（表里只有 只走 / dig），补上。 */
+  ['tunnel/dig+tower', () => caseMoveTunnel('dig+tower', MOVES[3][1])],
   ['shaft/dig', () => caseMoveShaft('dig', MOVES[1][1])],
   ['shaft/dig+tower', () => caseMoveShaft('dig+tower', MOVES[3][1])],
   ['shaft/tower', () => caseMoveShaft('tower', MOVES[2][1])],
@@ -566,12 +581,12 @@ async function setupPlayer () {
   await sleep(200)
   say('/clear ' + NAME)
   await sleep(300)
-  say('/give ' + NAME + ' iron_pickaxe 4')
+  say('/give ' + NAME + ' netherite_pickaxe 4')
   say('/give ' + NAME + ' cobblestone 128')
   await sleep(200)
   say('/give ' + NAME + ' cobblestone 128')
   await sleep(400)
-  say(`/item replace entity ${NAME} weapon.mainhand with minecraft:iron_pickaxe`)
+  say(`/item replace entity ${NAME} weapon.mainhand with minecraft:netherite_pickaxe`)
   await sleep(400)
 }
 
@@ -586,13 +601,13 @@ async function main () {
    *   后来给的铁镐静默失败）。这里先 /clear 再给，并明确把镐拿在手上。 */
   say(`/clear ${NAME}`)
   await sleep(400)
-  say(`/give ${NAME} minecraft:iron_pickaxe 4`)
+  say(`/give ${NAME} minecraft:netherite_pickaxe 4`)
   await sleep(150)
   say(`/give ${NAME} minecraft:cobblestone 128`)
   await sleep(150)
-  say(`/item replace entity ${NAME} weapon.mainhand with minecraft:iron_pickaxe`)
+  say(`/item replace entity ${NAME} weapon.mainhand with minecraft:netherite_pickaxe`)
   await sleep(500)
-  console.log('装备：铁镐×4、圆石×128，镐已在手上')
+  console.log('装备：下界合金镐×4（效率 V）、圆石×128，镐已在手上')
   try {
     const b0 = MC.bot ?? MC.requireBot?.()
     const items = (b0?.inventory?.items?.() ?? []).map((i) => `${i.name}x${i.count}`).join(', ')
