@@ -231,7 +231,7 @@ rep(
 )
 
 /* ── 2026-10-24 寻路通审：挖掘分支的永久粘住 ───────────────────────────── */
-rep(
+repIn(IDX,
   `      if (!digging && bot.entity.onGround) {
         digging = true
         const b = nextPoint.toBreak.shift()`,
@@ -489,6 +489,22 @@ repIn(
       "                    err: String((_ignoreError && _ignoreError.message) ? _ignoreError.message : _ignoreError).slice(0, 100)",
       "                  }",
       "                } catch (e4) {}",
+      "                /* 🔴 2026-11-01 实机（1×1 竖井，allowTower 一直垫不上）：那格**已经是",
+      "                 *   cobblestone 了**，`placeBlock` 却 reject —— 服务端把方块放上了，只是",
+      "                 *   `blockUpdate` 晚到（客户端等窗口只有 1 秒）。以前这里无脑",
+      "                 *   `resetPath('place_error')` ⇒ 重跳 ⇒ 再放 ⇒ 再报错 ⇒ 永远垫不上。",
+      "                 *   放上去了就当成功，别再当失败。 */",
+      "                let _placedOk = false",
+      "                try {",
+      "                  const _dst = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y + 1, placingBlock.z), false)",
+      "                  _placedOk = Boolean(_dst && _dst.boundingBox === 'block')",
+      "                } catch (e6) {}",
+      "                if (_placedOk) {",
+      "                  try { bot.__mcPlaceErr = null } catch (e7) {}",
+      "                  try { lockPlaceBlock.release() } catch (e8) {}",
+      "                  try { placing = false } catch (e9) {}",
+      "                  return",
+      "                }",
       "                resetPath('place_error')",
       "              })",
     ],
@@ -559,6 +575,39 @@ repIn(
       if (this.bot.vehicle && ent === this.bot.vehicle) { continue }
 `,
   '自己骑的载具不算障碍'
+)
+
+/* 🔴 2026-11-02（用户：「实心岩体里斜着挖不上去，一直挖其他方块，路线不是最短」）
+ *   真因：上游把 'blockC.height += 1' 写回 **prismarine-block 的缓存实例**（同一个坐标
+ *   永远是同一个对象），每算一次邻居就 +1 ⇒ 下一次同一位置必然
+ *   'height - block0.height > 1.2' 直接 return ⇒ **之后再也不生成斜上边**。
+ *   实机证据（MC_CARVE_DEBUG 打印 getNeighbors）：
+ *     digEdges=[-1,0,0brk2c31 | 1,0,0brk2c31 | 0,0,1brk2c31 | 0,-1,0brk1c48]
+ *   —— 只有平走和往下掉，一条 y+1 的边都没有，所以"斜着挖上去"永远退化成同一层横挖。
+ *   修掉之后立刻出现 '1,1,0brk4c17' / '0,1,1brk4c17'。 */
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  [ /* 纯上游（重装 deps 后的原始形态） */
+    `    cost += this.exclusionPlace(blockC)
+    blockC.height += 1
+
+    const block0 = this.getBlock(node, 0, -1, 0)
+    if (blockC.height - block0.height > 1.2) return // Too high to jump`,
+    /* 2026-10-29 那条补丁已插入注释之后的形态 */
+    `    cost += this.exclusionPlace(blockC)
+    /* 🔴 2026-10-29 DSH 补丁：这里原本还要在目标格下面“顺手垫一格”，已禁用。 */
+    blockC.height += 1
+
+    const block0 = this.getBlock(node, 0, -1, 0)
+    if (blockC.height - block0.height > 1.2) return // Too high to jump` ],
+  `    cost += this.exclusionPlace(blockC)
+    /* 🔴 2026-10-29 DSH 补丁：这里原本还要在目标格下面“顺手垫一格”，已禁用。 */
+    /* 🔴 2026-11-02 DSH 补丁：上游写回缓存的 'blockC.height += 1' 已删（会污染方块对象，
+     *  让斜上边第二次起就永远 return）。我们也不再垫方块，不需要这个高度补偿。 */
+
+    const block0 = this.getBlock(node, 0, -1, 0)
+    if (blockC.height - block0.height > 1.2) return // Too high to jump`,
+  '斜上边重新生成（别把 blockC.height 加一写回缓存）'
 )
 
 repIn(
@@ -816,6 +865,107 @@ repIn(
 
   // Jump up, down or forward over a 1 block gap`,
   '垫柱：整条边的 100 上限抬到 1000（getMoveUp 末尾）'
+)
+
+/* ── 2026-11-07：挖一半换别的（用户：「它老是挖一半就不挖了，然后挖其他的或者继续挖」，
+ *    场景＝`mc_move allowDig`；`allowDig+allowTower` 同理）────────────────────────
+ * 机制：每次开始挖都无条件 `nextPoint.toBreak.shift()` ⇒ 路径一重算（`path_update` 换了
+ *  `path[0]`）或 DIG_LOST 之后，上一块**挖到一半**的方块被丢掉、改用队列里的下一块；而
+ *  `bot.dig(另一块)` 会先 `stopDigging()`（mineflayer/lib/plugins/digging.js:127），
+ *  服务端那边的破坏进度随之清零 ⇒ 视觉上就是"挖一半换别的"。
+ * 改法：记住"这一块还没挖掉"（`digTarget`），只要它还实心、还在身边（≤3.5 格），路重算后
+ *  继续挖它；挖掉了才 shift 下一块；连续失败 3 次才放弃（防死磕一块挖不动的石头）。 */
+repIn(IDX,
+  '  let digStartedAt = 0\n  let lastNodeTime = performance.now()',
+  `  let digStartedAt = 0
+  let lastNodeTime = performance.now()
+  /* 🔴 2026-11-07 DSH：正在挖、但还没挖掉的那一格（跨路径重算保留，见下面挖分支） */
+  let digTarget = null
+  let digMiss = 0`,
+  '挖一半不丢：记住 digTarget（挖掉才换下一块）'
+)
+rep(
+  `      if (!digging && bot.entity.onGround) {
+        digging = true
+        digStartedAt = performance.now()
+        const b = nextPoint.toBreak.shift()
+        const block = bot.blockAt(new Vec3(b.x, b.y, b.z), false)`,
+  `      if (!digging && bot.entity.onGround) {
+        digging = true
+        digStartedAt = performance.now()
+        /* 🔴 2026-11-07 DSH：先看上一块挖完了没有 —— 没挖完就接着挖它，别 shift 下一块。 */
+        let b = null
+        if (digTarget) {
+          const kb = bot.blockAt(new Vec3(digTarget.x, digTarget.y, digTarget.z), false)
+          const kd = Math.hypot(digTarget.x + 0.5 - bot.entity.position.x, digTarget.z + 0.5 - bot.entity.position.z)
+          if (kb && kb.boundingBox === 'block' && kd <= 3.5) {
+            b = digTarget
+            const bi = nextPoint.toBreak.findIndex((t) => t && t.x === digTarget.x && t.y === digTarget.y && t.z === digTarget.z)
+            if (bi >= 0) nextPoint.toBreak.splice(bi, 1)
+          } else {
+            digTarget = null
+            digMiss = 0
+          }
+        }
+        if (!b) {
+          b = nextPoint.toBreak.shift()
+          if (!b) { digging = false; return }
+          digTarget = b
+          digMiss = 0
+        }
+        const block = bot.blockAt(new Vec3(b.x, b.y, b.z), false)`,
+  '挖分支：优先接着挖 digTarget'
+)
+repIn(IDX,
+  `        const digBlock = () => {
+          bot.dig(block, true)
+            .catch(_ignoreError => {
+              resetPath('dig_error')
+            })
+            .then(function () {
+              lastNodeTime = performance.now()
+              digging = false
+
+            })
+        }`,
+  `        const digBlock = () => {
+          bot.dig(block, true)
+            .catch(_ignoreError => {
+              /* DSH 2026-11-07：挖失败（Digging aborted / 服务端不认）**保留** digTarget，
+               *  下一轮接着挖同一块；连续失败 3 次才换下一块。 */
+              digMiss = (Number(digMiss) || 0) + 1
+              if (digMiss >= 3) { digTarget = null; digMiss = 0 }
+              resetPath('dig_error')
+              return false
+            })
+            .then(function (okDig) {
+              lastNodeTime = performance.now()
+              digging = false
+              if (okDig !== false) { digTarget = null; digMiss = 0 }
+            })
+        }`,
+  '挖成功才清 digTarget（失败保留，最多 3 次）'
+)
+
+/* 🔴 2026-11-02（用户批准 A）：toBreak 队列里会残留**已经挖掉的**坐标。
+ *   实机证据（`MC_DUG_DEBUG=1` 逐格核对 `tmp-dugdebug.jsonl`）：`shaft/dig+tower` 一趟挖
+ *   17 格，其中 7 格是 `air`（`364,202..208,-100` 每格都是"先挖 stone、再挖一次 air"），
+ *   全部来自这里的 `bot.dig(block)`。挖空气要白等 0.4~0.5 秒还占着 tick 不让路径重算。
+ *   改法：挖前复查方块是否还实心，不是就直接丢掉这个坐标（`b = null` 让下一 tick 取下一块）。 */
+repIn(IDX,
+  `        const block = bot.blockAt(new Vec3(b.x, b.y, b.z), false)
+        const tool = bot.pathfinder.bestHarvestTool(block)`,
+  `        const block = bot.blockAt(new Vec3(b.x, b.y, b.z), false)
+        /* DSH 2026-11-02：这一格可能**已经被挖掉了**（队列残留旧坐标）。挖空气白等 0.4~0.5 秒
+         *  还占着 tick，所以先复查：不是实心就丢掉这个坐标、下一 tick 取队列下一块。 */
+        if (!block || block.boundingBox !== 'block') {
+          digTarget = null
+          b = null
+          lastNodeTime = performance.now()
+          return
+        }
+        const tool = bot.pathfinder.bestHarvestTool(block)`,
+  '挖前复查：toBreak 里的格子已经空了就跳过（别挖空气）'
 )
 
 /* ── 其它补丁只做存在性检查（改法在踩坑档案里，不在这里重放） ───────────── */

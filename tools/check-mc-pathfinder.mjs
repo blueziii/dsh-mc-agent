@@ -462,6 +462,23 @@ ok(countOf(mvSrc, '.canDig = carveNoPathOk') >= 2 && countOf(mvSrc, '.canDig = f
   String(countOf(mvSrc, '.canDig = carveNoPathOk')))
 ok(/const carveAllowed = allowDig === true &&/.test(mvSrc), '卡住时"挖开台阶"的补救也因 allowDig 关掉')
 
+/* ★ 2026-11-02 侧向乱挖：A* 的挖边只许挖**朝目标那条主轴上的列**。
+ *   实机：目标通道在 z=1084，A* 却挖了 z=1083 的隔壁列（周围全实心时代价完全相同 ⇒ 随手选隔壁）。
+ *   `b.__mcAxis` 在 goto 前记下主轴，`plugins.mjs` 用 `mv.safeToBreak` 的包装拒掉侧列。
+ *   🔴 2026-11-02 补（双斜用例）：副轴**朝目标**的那一列必须放行 —— 否则 x/z 同时对角的
+ *   目标一步都挖不了（`diag2-up/dig+tower` 对角=0.0）。 */
+ok(/main: ddx >= ddz \? 'x' : 'z'/.test(mvSrc) && /mv\.safeToBreak = \(block\) =>/.test(plugSrc)
+  && /if \(ax\.main === 'z'\) return bpz\.x === bx \|\| \(ax\.x !== 0 && bpz\.x === bx \+ ax\.x\)/.test(plugSrc)
+  && /return bpz\.z === bz \|\| \(ax\.z !== 0 && bpz\.z === bz \+ ax\.z\)/.test(plugSrc),
+  '★ A* 挖边只许挖朝目标那一列（侧向格拒），但副轴朝目标的那一列要放行（对角台阶）',
+  `mv=${/main: ddx >= ddz \? 'x' : 'z'/.test(mvSrc)} plug=${/mv\.safeToBreak = \(block\) =>/.test(plugSrc)}`)
+
+/* ★ 2026-11-02 差 1 格别直接认输：目标格本身是实心时，`standPointFor` 会把落点挪到脚下、
+ *   `moved3d < 0.6` ⇒ 直接 `goal-not-standable`、一格不挖（`tunnel/dig` 第 3~5 次就是这样）。
+ *   现在先挖开目标格与它上面一格，再让 A* 重算。 */
+ok(/目标格 \(\$\{tX\},\$\{tY0\},\$\{tZ\}\) 是实心的/.test(mvSrc) && /dyOcc/.test(mvSrc),
+  '★ 目标格是实心且人已到旁边 ⇒ 先挖开它（和上面一格）再走，别直接报"目标格站不住"')
+
 /* 🔴 2026-10-30 守门：一个概念只能有一个名字。
  *   内部（src/）再出现 `noDig` 变量就是写回旧名了 —— 只允许三种合法残留：
  *     ① 常量 `MOVE_ESCAPES_NODIG`（它描述的是"不挖那套阶梯"，不是开关）；

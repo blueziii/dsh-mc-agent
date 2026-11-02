@@ -857,6 +857,31 @@ export function movements (self, { terrain = null, digFirst = false, allowDig = 
     }
   } catch {}
   mv.canDig = self.cfg.walkCanDig !== false        // 挡路的方块可以挖穿（不然掉坑里出不来）
+  /* 🔴 2026-11-02 用户（「allowdig 的测试调用几次后会乱挖」）：
+   *   实心岩体里"挖目标那一列"与"挖隔壁那一列"对 A* 代价完全相同 ⇒ 它随手挖隔壁。
+   *   实机 `tunnel/dig` 的 `dugAt`：目标列 z=1084，却在 z=1083 挖了一根柱子。
+   *   `movement.mjs` 在 `goto()` 之前把朝目标的主轴写在 `b.__mcAxis` 上（`{x,z}` 只有一个非 0）；
+   *   这里只放行**主轴那一列**的格子，侧向格一律不许挖（绕行仍能走，只是不许横向凿）。
+   *   ⚠️ 只影响 A* 的挖边；`mc_dig` / 脱困阶梯的 `carveStepAhead` 不走这个函数。 */
+  try {
+    const origSafeToBreak = mv.safeToBreak.bind(mv)
+    mv.safeToBreak = (block) => {
+      if (!origSafeToBreak(block)) return false
+      try {
+        const ax = b.__mcAxis
+        const bp = b?.entity?.position
+        const bpz = block?.position
+        if (!ax || !bp || !bpz) return true
+        const bx = Math.floor(bp.x)
+        const bz = Math.floor(bp.z)
+        /* 主轴那一列照旧；副轴**朝目标方向**再多给一格 —— 对角台阶要落在"斜上前方"那格，
+         * 死守同列会让斜向目标一步都挖不了（2026-11-02 `diag2-up/dig+tower` 对角=0.0）。 */
+        if (ax.main === 'z') return bpz.x === bx || (ax.x !== 0 && bpz.x === bx + ax.x)
+        return bpz.z === bz || (ax.z !== 0 && bpz.z === bz + ax.z)
+      } catch {}
+      return true
+    }
+  } catch {}
   /* 2026-10-31：垫一格按“多绕 N 步”计价。上游默认 1 太便宜 ⇒ `allowTower:true` 时
    *   “能跳上去 / 能绕”的地方也一路垫方块。现在只有真没路才垫。
    * 🔴 2026-11-02 审计（#9）：这里以前就把 `cfg.walkTowerCost ?? 4` 写进 `mv.placeCost` ——

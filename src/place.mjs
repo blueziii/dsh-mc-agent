@@ -20,7 +20,7 @@
 import vec3pkg from 'vec3'
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 
-import { sleep } from './async-util.mjs'
+import { sleep, withTimeoutSoft } from './async-util.mjs'
 import { lookAnglesTo } from './camera.mjs'
 import { isAir, isLiquid, canPlaceInto, isEntityItem } from './block-names.mjs'
 import { pickPlaceItem, isFullBlockItem } from './place-items.mjs'
@@ -506,7 +506,25 @@ export async function placeBlock (self, { x, y, z, name = null } = {}, ctx = {})
     && pos.x === feetNow.x && pos.z === feetNow.z
     && (pos.y === feetNow.y || pos.y === feetNow.y + 1)
   try {
-    if (isOwnCell) await ctx.t(placeWhileJumping(b, ref.ref, ref.face), 'place', '跳起来放到自己脚下')
+    /* 🔴 2026-11-02（用户实机多轮长测：单次 mc_move 出现 24.6 / 36.7 秒，随后掉线）：
+     *   这两处 `b.placeBlock(...)` / `placeWhileJumping(...)` 原来**没有任何守护** ——
+     *   socket 半死（`write ECONNABORTED` 前那种状态）时 await 永不 settle，
+     *   整个工具调用就突破 `CALL_MS` 的 11 秒硬上限。这里给 2 秒上限，超时按放置失败报。 */
+    const placeHard = async (p, what) => {
+      const r = await withTimeoutSoft(Promise.resolve().then(() => p), 2_000)
+      if (r?.timedOut) {
+        /* 超时按"没放成"报，但文案要能说清**为什么**这一格特别难放：
+         * 放自己脚下/齐腰那格时，服务端经常回都不回（那格被自己身体占着）。 */
+        if (isOwnCell) {
+          throw new Error(`服务端 2 秒没回包：**那一格是我自己身体占着的**（脚下/齐腰），`
+            + '已经试过"跳起来放"也没成 —— 先 `mc_move` 挪开一格、或者把**下面那一格**填上再站上去。')
+        }
+        throw new Error(`${what}：服务端 2 秒没回包（已放弃，**别当成放成功了**）`)
+      }
+      if (r && r.ok === false) throw r.error
+      return r?.value
+    }
+    if (isOwnCell) await placeHard(placeWhileJumping(b, ref.ref, ref.face), '跳起来放到自己脚下')
     else {
       /* 🔴 2026-11-02 审计（#1）：这里原来**不传 before** —— 而 `name` 取的是 `b.heldItem?.name`，
        *   放完最后一块时手里是空的 ⇒ `name` 为 null、`before` 也是 null ⇒ 判据退化成"那格非空 = 成功"，
@@ -514,7 +532,7 @@ export async function placeBlock (self, { x, y, z, name = null } = {}, ctx = {})
       const tgt = placeTargetOf(ref.ref, ref.face)
       let beforeAt = null
       try { beforeAt = tgt ? (b.blockAt(tgt, false)?.name ?? null) : null } catch { beforeAt = null }
-      await ctx.t(b.placeBlock(ref.ref, new Vec3(ref.face.x, ref.face.y, ref.face.z)), 'place', '放置方块')
+      await placeHard(b.placeBlock(ref.ref, new Vec3(ref.face.x, ref.face.y, ref.face.z)), '放置方块')
       /* 🔴 用户 2026-10-29：回包成功 ≠ 方块真出现（幽灵方块 / 回包丢）。回头看一眼世界。 */
       const c = await confirmPlaced(b, tgt, { name: b.heldItem?.name ?? null, before: beforeAt, waitMs: 700 })
       try { b.__placeConfirm = c } catch { /* 同上 */ }

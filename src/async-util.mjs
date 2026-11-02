@@ -58,6 +58,28 @@ export function withTimeout (promise, ms, label) {
 }
 
 /**
+ * 与 `withTimeout` 同样赛跑，但**不抛错**：超时回 `{ timedOut: true }`，正常回 `{ ok: true, value }`。
+ *
+ * 🔴 2026-11-02 用户实机（多轮长测）：单次 `mc_move` 实测 13.5 / 24.6 / 36.7 秒，最后一次
+ *   直接把连接搞掉（`write ECONNABORTED`）。查日志：12:45:28 已经正常收工，
+ *   下一条日志在 12:45:50 —— 22 秒花在**收尾**（`restoreHeldOf` → `b.equip`）上，
+ *   而收尾阶段没有任何守护。这类 await 在 socket 半死时会一直不 settle，
+ *   `Promise.race` 那套（`guarded` / `walkTo` 的 guardTimer）都管不到它。
+ *
+ * 用法：`const r = await withTimeoutSoft(work, 1_500); if (r.timedOut) …`
+ * 语义上是"最多等这么久，等不到就当中途放弃"——调用方自己决定怎么记账。
+ */
+export function withTimeoutSoft (promise, ms) {
+  const TO = Symbol('soft-timeout')
+  let timer
+  const guard = new Promise((resolve) => { timer = setTimeout(() => resolve(TO), Math.max(1, Number(ms) || 1)) })
+  if (promise && typeof promise.catch === 'function') promise.catch(() => {})
+  return Promise.race([Promise.resolve(promise).then((v) => ({ ok: true, value: v }), (e) => ({ ok: false, error: e })), guard])
+    .then((r) => (r === TO ? { ok: false, timedOut: true } : r))
+    .finally(() => { if (timer) clearTimeout(timer) })
+}
+
+/**
  * 与 AbortSignal 赛跑 —— 让"停止按钮"真正有效。
  *
  * 为什么必须单独做：宿主的停止链路（GUI 停止键 → POST /api/session/cancel →

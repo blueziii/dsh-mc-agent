@@ -491,11 +491,16 @@ export async function digStair (self, {
   const aheadOk = (from, to) => {
     if (!to || !Number.isFinite(to.x) || !Number.isFinite(to.y) || !Number.isFinite(to.z)) return false
     const dy = Number(to.y) - Number(from.y)
-    if (up ? dy > 0 : dy < 0) return true
-    if (dy !== 0) return false
     const fwd = d.x !== 0
       ? (Number(to.x) - Number(from.x)) * Math.sign(d.x)
       : (Number(to.z) - Number(from.z)) * Math.sign(d.z)
+    /* 🔴 2026-11-02 实机（`cur=9939,211` 而目标列是 `9940,212`）：往上那一下**只升不前进**
+     *   （贴着墙原地跳），老代码 `dy > 0` 就直接采纳 ⇒ 锚点被记成原地升高的那一格，
+     *   下一步的目标列正好落在"自己刚挖空的落脚面"上（脚下 air）⇒ 后面全是 no-wall / 0 毫秒收工，
+     *   用户看到的就是「原地跳跃后往后退，退两三格就不动了」。
+     *   规矩：往上的那一步**必须同时往前**才算数。 */
+    if (up ? dy > 0 : dy < 0) return fwd > 0
+    if (dy !== 0) return false
     return fwd > 0
   }
   let curBack = 0
@@ -595,6 +600,30 @@ export async function digStair (self, {
       adoptCur(b.entity.position.floored())
       return true
     }
+    /* 沿 dir 连"能站的墙"都找不到（这一层已经被我们自己挖成通道了）时，别立刻收工：
+     * 沿 dir **平推走到第一列"脚下有地板"的位置**，下一轮就从那里接着往上挖。
+     * 🔴 2026-11-02 用户定的兜底（问「为什么会报 no-wall」后选）：只朝 dir 前进，不换向、不后退。
+     *   实机现场：`cur=9939,211 目标列=9940,212 foot=air head=air floor=air`（落脚面被自己挖掉了）
+     *   ⇒ 同层 8 格无墙 ⇒ 老代码 0 毫秒报 no-wall、连叫 6 次都原地不动。 */
+    const pushForwardToFloor = async () => {
+      if (budgetMs - (Date.now() - t0) < 3_000) return false
+      const restP = budgetMs - (Date.now() - t0) - 1_200
+      if (restP < 800) return false
+      for (let r = 1; r <= WALL_SCAN_AHEAD; r++) {
+        const x = cur.x + d.x * r
+        const z = cur.z + d.z * r
+        const under = blkAt(x, cur.y - 1, z)
+        if (!under || isAir(under.name) || isLiquid(under.name)) continue
+        notes.push(`🧱 沿 ${dirNameOf(d)} 这一层没有现成的墙 —— 先往前走到 ${x},${cur.y},${z}（那边脚下有地板），从那里再起台阶`)
+        try {
+          const w3 = await self.walkTo({ x, y: cur.y, z }, { allowDig: false, budget: Math.min(2_500, restP), intent: 'stand' })
+          if (w3?.arrived !== true) notes.push(`⚠ 没走到那格：${w3?.hint ?? w3?.reason ?? '没给原因'}`)
+        } catch (e) { notes.push(`⚠ 走过去抛错：${e?.message ?? e}`) }
+        adoptCur(b.entity.position.floored())
+        return true
+      }
+      return false
+    }
     /* 剩余时间不够走一步 ⇒ 直接收工成 budget（不再让 walkTo 越过预算边界后误判 stuck） */
     if (budgetMs - (Date.now() - t0) < STAIR_MIN_STEP_MS) { reason = 'budget'; break }
     if (up ? cur.y >= ty : cur.y <= ty) { reason = 'done'; break }
@@ -606,7 +635,18 @@ export async function digStair (self, {
     /* 上下**都是 3 格高**（用户 2026-10-25「stair往上挖也是挖3格」）：
      * 走过去那一刻身体要占 fy / fy+1 两格，头顶再留 1 格 ⇒ 一律挖 fy / fy+1 / fy+2。 */
     const cells = [fy, fy + 1, fy + 2].map((y) => ({ x: fx, y, z: fz }))
-    const names = cells.map((c) => blkAt(c.x, c.y, c.z)?.name ?? null)
+    let names = cells.map((c) => blkAt(c.x, c.y, c.z)?.name ?? null)
+    /* 🔴 2026-11-02 长测（40 分钟那轮 + 单跑复现）：`stair-up` 第 2 次之后**每次 0 毫秒**返回
+     *   「走了 0 步（沿已有通道）」，模型重试多少次都一样。真因是这里 —— 前方那 3 格所在区块
+     *   还没到客户端（`names` 里有 null）⇒ `reason='unloaded'` 立刻 break。
+     *   方块加载是**会自己到**的（几百毫秒），一等就走，不该当成"没路"。 */
+    if (names.some((n) => n == null)) {
+      for (let k = 0; k < 8 && names.some((n) => n == null); k++) {
+        try { await b.waitForChunksToLoad?.() } catch { /* 老版本没有这个方法 */ }
+        await sleep(150)
+        names = cells.map((c) => blkAt(c.x, c.y, c.z)?.name ?? null)
+      }
+    }
     if (names.some((n) => n == null)) { reason = 'unloaded'; break }
     if (names.some((n) => isLiquid(n))) { reason = 'liquid'; break }
     const floor = blkAt(fx, fy - 1, fz)
@@ -632,10 +672,55 @@ export async function digStair (self, {
      *    ⇒ 方向由 `dir` 锁死：前方没台阶面就**沿这个方向走过去**找墙，
      *      不换面、也不绕到别的方向的墙上去（之前那套换面 + 四邻找墙已撤掉）。 */
     if (up && isAir(floor.name)) {
-      if (await huntAlongDir(`前方 ${fx},${fy},${fz} 没有台阶面（踩不住）`, true)) continue
-      reason = 'no-wall'
-      notes.push(`⛔ 沿 ${dirNameOf(d)} 往前 ${WALL_SCAN_AHEAD} 格都没有能往上挖的墙 —— 换一个 dir，或先用 mc_move 走到岩壁边上`)
-      break
+      /* 🔴 2026-11-02 实机（用户：「dig stair 往上挖，如果没有跳上方块就会往后退」；40 分钟长测里
+       *   表现为"卡进位之后每次调用 0 毫秒返回 🪜 走了 0 步（沿已有通道）"，模型重试多少次都一样）：
+       *   半坡/坑沿上，前方**同层脚下是空**、可**上一层还是实心** —— 那不是"这个方向没墙"，
+       *   是"台阶面还没挖出来"。老代码在这里直接 `huntAlongDir`，而 `findWallSpotAhead` 只在
+       *   **同一水平面**找站立点（脚位空 + 头顶空 + 脚下实心）⇒ 半坡前方同层全是岩体 ⇒ 返回 null
+       *   ⇒ `no-wall` 立刻收工。现在：先看目标列那 3 格还有没有可挖的方块 —— 有就挖开再往上
+       *   （继续走下面的正常流程），一格都没有（真·空气通道）才沿方向找墙，找不到才如实报 no-wall。 */
+      const diggable = cells.filter((c) => {
+        const q = blkAt(c.x, c.y, c.z)
+        return q && !isAir(q.name) && !isLiquid(q.name)
+      })
+      /* 两种"前方脚位空"要分开处理（2026-11-02 实测：
+       *   ① 站在一段空通道里（前方 3 格都是空的）—— 在原地挖头顶再跳是**错的**：脚下没落点，
+       *      跳上去必然掉回来，长测里表现为"只往前挪 1 格就 stuck"。
+       *      这时该沿 `dir` 走到最近的墙边再挖（用户 m01988：「周围没有墙会自己到挖的方向
+       *      最近的墙开始挖吗」—— 之前不会，就是被下面这条判断吃掉了）。
+       *   ② 卡在半坡/坑沿（前方脚位空，但上一层还是实心）—— 那就把那一格挖开再往上站。 */
+      const passableAt = (q) => Boolean(q) && (isAir(q.name) || isPassable(q.name))
+      const upFoot = blkAt(fx, fy, fz)
+      const upHead = blkAt(fx, fy + 1, fz)
+      const upFloor = blkAt(fx, fy - 1, fz)
+      /* 🔴 2026-11-02 长测（`reason=no-wall steps=0 ms=0`）：目标列 3 格全空、**脚下却是实心** ——
+       *   那不是"空通道"，那是"台阶面早就挖好了，只差跳上去"（爬到最后一级时最常见）。
+       *   老代码只问"脚位空不空"就去 `huntAlongDir`，扫同层 8 格当然找不到（我方已经挖空了），
+       *   ⇒ 0 毫秒报 no-wall、模型连叫 6 次都原地不动。 */
+      const upFloorSolid = Boolean(upFloor) && !isAir(upFloor.name) && !isLiquid(upFloor.name)
+      try {
+        if (process.env.MC_STAIR_DEBUG) {
+          self.log(`[stair-blk] cur=${cur.x},${cur.y},${cur.z} d=${d.x},${d.z} 目标列=${fx},${fy},${fz} foot=${upFoot?.name ?? '?'} head=${upHead?.name ?? '?'} floor=${upFloor?.name ?? '?'} floorSolid=${upFloorSolid} diggable=${diggable.length}`)
+        }
+      } catch { /* 忽略 */ }
+      if (!upFloorSolid && passableAt(upFoot) && passableAt(upHead)) {
+        if (await huntAlongDir(`前方 ${fx},${fy},${fz} 是能走的空通道（没有台阶面）`, true)) continue
+        if (await pushForwardToFloor()) continue
+        reason = 'no-wall'
+        notes.push(`⛔ 沿 ${dirNameOf(d)} 往前 ${WALL_SCAN_AHEAD} 格都没有能往上挖的墙 —— 换一个 dir，或先用 mc_move 走到岩壁边上`)
+        break
+      }
+      if (diggable.length === 0) {
+        if (!upFloorSolid) {
+          if (await huntAlongDir(`前方 ${fx},${fy},${fz} 没有台阶面（踩不住）`, true)) continue
+          if (await pushForwardToFloor()) continue
+          reason = 'no-wall'
+          notes.push(`⛔ 沿 ${dirNameOf(d)} 往前 ${WALL_SCAN_AHEAD} 格都没有能往上挖的墙 —— 换一个 dir，或先用 mc_move 走到岩壁边上`)
+          break
+        }
+        notes.push(`🧗 前方 ${fx},${fy},${fz} 那 3 格已经是空的、脚下 ${upFloor.name} 是台阶面 —— 不用挖，直接跳上去`)
+      }
+      notes.push(`🧗 前方 ${fx},${fy},${fz} 脚下是空的，但 ${diggable.map((c) => `${c.x},${c.y},${c.z}`).join(' / ')} 还有方块 —— 先挖开这几格，再往上站`)
     }
     /* 🔴 2026-10-26 实机（用户：「dig stair 往上挖还是只挖两格会被卡住」）：
      *   往上挖时只清了**前方**那 3 格，漏了"我自己得跳上去"这件事 —— 跳跃需要
@@ -774,7 +859,12 @@ export async function digStair (self, {
        *   现在的规矩：**`cur` 永远取人的真实位置**；走回原位只是“试着把位置摆正”，成败都无所谓。 */
       const off = Math.hypot(now.x - cur0.x, now.z - cur0.z)
       const restB = budgetMs - (Date.now() - t0)
-      if (off >= 0.6 && restB > 2_500) {
+      /* 🟢 2026-11-02 用户（「dig stair 往上挖，如果没有跳上方块就会往后退」/「我是说 dig 的 stair 模式」）：
+       *   「走回原位」只在**同层 / 往下**时才做。往上挖时被顶开一格是撞墙起跳的正常副作用，
+       *   把人拖回去要做一整趟 walkTo（1.5~2 秒），退掉的正是刚爬上来的高度 ——
+       *   用户看到的就是"没跳上去就后退"。往上这一步只保留原地重跳（下面的 stepUp ×2），
+       *   还不行就如实报卡住，锚点一格都不退。 */
+      if (!up && off >= 0.6 && restB > 2_500) {
         notes.push(`↩ 没跳上去还被顶开了 ${off.toFixed(1)} 格（${now.x},${now.y},${now.z}）—— 试走回 ${cur0.x},${cur0.y},${cur0.z}`)
         let backOk = false
         try {
@@ -787,6 +877,10 @@ export async function digStair (self, {
         /* 🔴 2026-11-05：这里原来 `cur = real`（以及 else 分支 `cur = b.entity.position.floored()`）——
          *   正是“一直后退”的直接来源。回不去原位时，把锚点改成人的实际位置只会让目标一步步往后挪。
          *   `cur` 保持不动：这一步没成就是没成，下一轮还打同一格。 */
+      }
+      /* 往上挖被顶开：不往回走，只把现状说清楚（下面原地重跳） */
+      else if (up && off >= 0.6) {
+        notes.push(`↩ 没跳上去、被顶开 ${off.toFixed(1)} 格（${now.x},${now.y},${now.z}）—— 往上不往回走，原地再跳一次`)
       }
       /* 🔴 时间到被砍断 ≠ 卡住。剩余时间不够再走一步时如实报 budget；
        *   说成"卡住"会让模型去 mc_observe / 换方向，把本来接着叫一次就能挖完的活丢掉。 */
@@ -823,6 +917,11 @@ export async function digStair (self, {
   }
 
   const now = b.entity.position.floored()
+  try {
+    if (process.env.MC_STAIR_DEBUG) {
+      self.log(`[stair] reason=${reason} steps=${steps} dug=${dug} start=${start.y} now=${now.y} ty=${ty} up=${up} notes=${notes.length} ms=${Date.now() - t0}`)
+    }
+  } catch { /* 忽略 */ }
   const left = up ? ty - now.y : now.y - ty
   /* 🔴 2026-10-27（用户 m02756「这个会话的 dig 和 move 根本不准确」；实测 session-514c21b6）：
    *    以前不管挖没挖都写「挖了 N 步、M 块方块」⇒ 出现过「**挖了 23 步、0 块方块**」这种
@@ -843,6 +942,9 @@ export async function digStair (self, {
       ? `⛔ 最后一步没走成，但这一轮已经从 y=${start.y} 走到 y=${now.y}（推进 ${Math.abs(climbed)} 格）—— 再叫一次 \`mc_dig {mode:"stair", y:${ty}}\` 接着挖，挖好的不会白挖。`
       : `⛔ 一步都没走动（还停在 y=${now.y}）—— 下面那行是当时各方块的真实情况（脚位/头顶/脚下/自己头顶两格/寻路的原因），照它决定下一步：缺台阶面就换方向、头顶堵着就先清、别原地重叫。`,
     unloaded: '⏳ 前面的区块还没加载完 —— 等一下再叫。',
+    /* 🔴 2026-11-02：`no-wall` 一直没进这张表 ⇒ 模型只看到「走了 0 步（沿已有通道）」，
+     *    完全看不出真实原因是"这个方向同层找不到可挖的台阶面"（长测里就是被这句误导的）。 */
+    'no-wall': '⛔ 这个方向往前 8 格都没有能往上挖的墙（**不是**"沿通道走完了"）—— 换一个 dir（x- / z+ / z-），或先用 mc_move 走到岩壁边上再叫 dig stair。',
   }[reason] ?? ''
   const hint = reason === 'done' ? '' : `
 还剩 ${Math.max(0, left)} 格到 y=${ty}。`

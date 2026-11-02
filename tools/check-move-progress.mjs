@@ -4005,6 +4005,18 @@ section('通审：计数、口径、开关、预算')
     ok(/const isEndOf = \(g\) => \(fp && typeof g\?\.isEnd === 'function' \? Boolean\(g\.isEnd\(fp\)\) : null\)/.test(mvT)
       && /const mine = xz\s*\n\s*\? \(isEndOf\(goal\) === true \? true : null\)/.test(mvT.replace(/\r\n/g, '\n')),
       '★ xz 的 mine：isEnd 只用来确认（GoalXZ 没半径，不能拿它否认），问不到就 null 交给距离')
+    /* ⑥ 用户定调（2026-11-02）：「move 单 dig 朝目标点先挖阶梯到目标点水平格，然后水平挖过去；
+     *    move dig+tower 垂直挖垫到水平格，然后水平挖过去」。实心岩体里 A* 每趟都用满 thinkTimeout
+     *    再 path-reset（人不动），所以 dig 档还差 2 格以上时直接让 climbUp/stepDown 先把人送到
+     *    目标那一层，再交回 A* 走水平段。 */
+    ok(/if \(attempt === 0 && carveNoPathOk && noTower !== false\) \{/.test(mvT)
+      && /planTried\.push\('climbToLevel'\)/.test(mvT)
+      && /planTried\.push\('stepDownToLevel'\)/.test(mvT),
+      '★ dig 档分两段：先 climbUp/stepDown 到目标那一层（climbToLevel / stepDownToLevel），再水平挖过去')
+    ok(/export function deepBuried \(b\) \{/.test(mvT),
+      '★ deepBuried 导出：四周含头顶 +2 全是实心（实心岩体里被埋住）')
+    ok(!/\.thinkTimeout\s*=/.test(mvT),
+      '★ 移动层不许自己改 pathfinder.thinkTimeout（实测压到 1.2 秒 A* 算不完垫柱边，人反而一格不动）')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

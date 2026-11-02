@@ -304,15 +304,20 @@ section('12. 每步预算跟着剩余时间走（时间到 ≠ 卡住）+ 前方
    *    失败 / 反向 / 原地 / 空中坐标一律不采纳 —— 否则目标格会跟着后退。
    *    2026-11-05 用户：「现在还是会后退，效果是之前的更好」⇒ 从“成功才更新”收紧成“前进才更新”。 */
   ok(/const aheadOk = \(from, to\) =>/.test(mnS), '★ 有 aheadOk 守门（只许朝目标方向前进）')
-  ok(/if \(up \? dy > 0 : dy < 0\) return true/.test(mnS), '★ 跨层要朝 up 的方向')
+  ok(/if \(up \? dy > 0 : dy < 0\) return fwd > 0/.test(mnS), '★ 跨层那一步必须「朝 up **且** 往前」（只升不前进 = 贴墙原地跳，会把锚点记在原地升高那格，下一步脚下就没有台阶面了）')
   ok(/if \(ok\) adoptCur\(now\)/.test(mnS), '★ 锚点只前进（成功且过 aheadOk 才更新）')
-  ok((mnS.match(/\n\s*adoptCur\(b\.entity\.position\.floored\(\)\)\s*\r?\n/g) || []).length === 1
+  ok((mnS.match(/\n\s*adoptCur\(b\.entity\.position\.floored\(\)\)\s*\r?\n/g) || []).length === 2
     && !/\n\s*cur = b\.entity\.position\.floored\(\)\s*\r?\n/.test(mnS)
     && !/\n\s*cur = real\s*\r?\n/.test(mnS)
     && !/\n\s*cur = now\s*\r?\n/.test(mnS)
     && !/\n\s*cur = nowH\s*\r?\n/.test(mnS),
-    '失败时不再把锚点改成真实位置（只剩“沿 dir 走到墙位”那一处，也要过 aheadOk）')
+    '失败时不再把锚点改成真实位置（只剩“沿 dir 走到墙位”与“沿 dir 平推到有地板处”两处，都过 aheadOk 守卫）')
   ok(/没走回原位[\s\S]{0,200}下一步仍然按原锚点算/.test(mnS), '走不回原位时如实说出来，并向模型保证不会跟着退')
+  /* ★ 2026-11-02 用户（「dig stair 往上挖，如果没有跳上方块就会往后退」/「我是说 dig 的 stair 模式」）：
+   *   往上挖时被顶开一格是撞墙起跳的正常副作用，**不许**再走回原位 —— 那一步既费 1.5~2 秒，
+   *   又把刚爬上来的高度退掉（用户看到的就是"后退"）。只有同层 / 往下才允许"试着走回去"。 */
+  ok(/if \(!up && off >= 0\.6 && restB > 2_500\)/.test(mnS) && /往上不往回走/.test(mnS),
+    '★ 往上挖没跳上去 ⇒ 原地再跳，不往回走（只同层/往下才试走回原位）')
 
   /* ③ 高度对了还不够：跳上旁边一格不算这一步。 */
   ok(/const stayedHere = Math\.hypot\(nowH\.x - fx, nowH\.z - fz\) <= 0\.9/.test(mnS),

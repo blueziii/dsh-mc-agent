@@ -375,7 +375,7 @@ section('⑧ 目标格 = 自己站的那一格 —— 必须跳起来放（pilla
   const placeSrc2 = readFileSync(new URL('../src/place.mjs', import.meta.url), 'utf8')
   ok(/const isOwnCell = Boolean\(feetNow\)/.test(placeSrc2), 'place.mjs 里有 isOwnCell 判据')
   ok(/pos\.y === feetNow\.y \|\| pos\.y === feetNow\.y \+ 1/.test(placeSrc2), '脚下与齐腰两格都算"自己占着"')
-  ok(/if \(isOwnCell\) await ctx\.t\(placeWhileJumping/.test(placeSrc2), '自己占着的那一格走 placeWhileJumping')
+  ok(/if \(isOwnCell\) await placeHard\(placeWhileJumping/.test(placeSrc2), '自己占着的那一格走 placeWhileJumping（包在 placeHard 里：服务端不回包也不许拖过 CALL_MS）')
 }
 
 
