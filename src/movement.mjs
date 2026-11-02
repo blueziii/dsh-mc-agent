@@ -806,6 +806,8 @@ async function walkToInner (self, target, opts = {}, ctx = {}) {
   const keep = heldSnapshotOf(b)
   let out = null
   const t0 = Date.now()
+  /* 每次 walkTo 从这里重新记「这趟挖了几格 / 爬了几层」—— 跨调用累计会让"卡住"判定永远判不出来。 */
+  try { b.__mcCarved = 0; b.__mcClimbed = 0 } catch { /* 断线/假 bot */ }
   /* 硬上限：预算 + `MOVE_HARD_SLACK_MS`（留给脱困阶梯/挖一格这些"预算外"动作）。
    * `ctx.walkGuardMs` 是给离线套件注入的（不然一条断言要真等 3 秒）。 */
   const budgetMs = Number(opts?.budget ?? self?.cfg?.moveBudgetMs) || 0
@@ -2664,7 +2666,11 @@ export async function digOneGuarded (b, blk, { digMs = MOVE_CARVE_DIG_MS } = {})
   try {
     const tool = typeof b.pathfinder?.bestHarvestTool === 'function' ? b.pathfinder.bestHarvestTool(blk) : null
     if (tool && typeof b.equip === 'function') await guarded(b.equip(tool, 'hand'))
-    return await guarded(b.dig(blk, true)) === true
+    const okDig = await guarded(b.dig(blk, true)) === true
+    /* 🔴 2026-11-02：`__mcCarved` 以前**只读不写**，于是「超过硬上限被掐断」永远按
+     *   「服务端不回包」报（明明在正常挖）。这里是真的挖成一格，累加给上层用。 */
+    if (okDig) { try { b.__mcCarved = (Number(b.__mcCarved) || 0) + 1 } catch { /* 假 bot */ } }
+    return okDig
   } catch { return false }
 }
 
@@ -3856,35 +3862,45 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
      *   - **跳不上去不换方向**（换方向不是解药），直接把 no-lift 报上去。 */
     try {
       const memo = b?.__mcClimbDir
-      if (Array.isArray(memo) && (memo[0] || memo[1]) && b?.__mcClimbDirFor === memoKey) {
-        /* 🔴 2026-11-06 用户：「单 dig 挖台阶有时候会转向」——
-         *   旧代码无条件把它 unshift 到最前 ⇒ **逆着目标方向**也照爬（越爬越偏，最后停在
-         *   离目标 4 格的那一列）。现在分两种：
-         *    · 目标是头顶那一列（`aligned`）：没有朝向可循，沿用"上次成功的方向"最稳；
-         *    · 目标有水平朝向：记忆**不许和它相反**（点积 ≤ 0 就丢掉并清记忆），
-         *      同侧才允许提前（在相邻列之间来回抖时靠它定住）。 */
-        /* `aligned` 用 **±1 格**而不是"精确同列"：
-         * 挖台阶往上每层必然水平偏 1 格（斜上方挖两格才有落脚面），一旦偏出去，
-         * "精确同列"就不成立了 ⇒ 主轴立刻翻转成"回目标列" ⇒ 掉头，这就是"转向"。
-         * 允许 ±1 格后，偏出去那层仍算"目标在头顶"，继续同侧爬，水平稳定只偏 1 格；
-         * 真偏到 2 格以上（螺旋了）才交给下面的主轴/点积判定拉回来。 */
-        const aligned = Number.isFinite(tx) && Number.isFinite(tz)
-          && Math.abs(fx - Math.floor(tx)) <= 1 && Math.abs(fz - Math.floor(tz)) <= 1
-        const atCol = Number.isFinite(tx) && Number.isFinite(tz)
-          && fx === Math.floor(tx) && fz === Math.floor(tz)
-        const first = (d) => {
-          const i = cand.findIndex((c) => c[0] === d[0] && c[1] === d[1])
+      const memoOk = Array.isArray(memo) && (memo[0] || memo[1]) && b?.__mcClimbDirFor === memoKey
+      /* 🟢 2026-11-02 用户：「挖台阶方向要向着目标点」——
+       *   以前按"上次成功的方向（记忆）"定，只在"记忆与目标反向"时才拉回来；
+       *   实测（shaft/dig）会顺着同侧多爬 1~2 格再掉头，白挖 3~6 格。
+       *   现在直接按"这一步是否拉近目标"排序：朝目标的方向永远第一，
+       *   同分（同一侧里挑不出差别、或已站在目标列）才用记忆定住，避免左右来回抖。
+       *   —— 这样台阶是一条**走向目标**的斜梯，而不是原地锯齿。 */
+      const tdx = Number.isFinite(tx) ? Math.sign(Math.floor(tx) - fx) : 0
+      const tdz = Number.isFinite(tz) ? Math.sign(Math.floor(tz) - fz) : 0
+      const toward = (d) => d[0] * tdx + d[1] * tdz
+      /* 🟢 2026-11-02 用户：「allowdig 应该阶梯挖到目标高度，然后水平挖过去」。
+       *   实测（shaft/dig）：一路朝目标那一列往上挖，会把**目标脚下那格**也当成斜上落脚面挖空
+       *   ⇒ 人爬到目标高度却站不住，下一趟直接 `goal-not-standable`（看起来像"到不了"）。
+       *   规矩：离目标还差一格以上时，**不从目标那一列往上爬**（绕开它，落脚面留在邻列），
+       *   等爬到同高再水平挖进目标列（那时 dyS≈0，`goalStraightUpOf` 不拦，交给 carveStepAhead）。 */
+      const tyS = Number(target?.y)
+      const nearTop = Number.isFinite(tyS) && fy + 1 >= Math.floor(tyS)
+      const isTargetCol = (d) => Number.isFinite(tx) && Number.isFinite(tz)
+        && fx + d[0] === Math.floor(tx) && fz + d[1] === Math.floor(tz)
+      if (!tdx && !tdz) {
+        /* 已经在目标那一列：没有"朝向"可循，沿用上次成功的方向（记忆按目标指纹校验过）。 */
+        if (memoOk) {
+          const i = cand.findIndex((c) => c[0] === memo[0] && c[1] === memo[1])
           if (i > 0) cand.unshift(cand.splice(i, 1)[0])
-          return i >= 0
         }
-        if (atCol || (memo[0] * dx + memo[1] * dz) > 0) first(memo)
-        else if (aligned) {
-          /* 已经偏出去 1 格 ⇒ **先回目标列**（zig-zag），不要顺着同侧继续爬。
-           * 🔴 2026-11-06 实机（shaft/dig）：一路 +z 爬到 z+2 才掉头，白挖 6 格、水平漂 2 格。 */
-          if (!first([-memo[0], -memo[1]])) first(memo)
-        } else {
-          try { b.__mcClimbDir = null; b.__mcClimbDirFor = null } catch { /* 假 bot */ }
-        }
+      } else {
+        cand.sort((p, q) => {
+          if (!nearTop) {
+            const ap = isTargetCol(p) ? 1 : 0
+            const aq = isTargetCol(q) ? 1 : 0
+            if (ap !== aq) return ap - aq
+          }
+          const s = toward(q) - toward(p)
+          if (s !== 0) return s
+          if (!memoOk) return 0
+          const mp = p[0] === memo[0] && p[1] === memo[1] ? 1 : 0
+          const mq = q[0] === memo[0] && q[1] === memo[1] ? 1 : 0
+          return mq - mp
+        })
       }
     } catch { /* 假 bot */ }
     let lifted = false
@@ -3960,6 +3976,8 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
       if (upOk) {
         lifted = true
         try { b.__mcClimbDir = [sx, sz]; b.__mcClimbDirFor = memoKey } catch { /* 假 bot */ }
+        /* 真的升上去一层 —— 记一笔，供顶层区分「时间到、还在往上爬」和「真的卡住」。 */
+        try { b.__mcClimbed = (Number(b.__mcClimbed) || 0) + 1 } catch { /* 假 bot */ }
         break
       }
       refused = { why: 'no-lift', dir: [sx, sz], ...(need.length ? { blockedBy: String(need[0].name) } : { blockedBy: 'air' }) }
@@ -4067,6 +4085,8 @@ async function digOneSafe (b, blk, ctx, digMs) {
       sleep(digMs).then(() => TO),
     ])
     if (r === TO) { try { b.stopDigging?.() } catch {} ; return false }
+    /* 同 `digOneGuarded`：挖成一格就记一笔（climbUp 走的是这个入口，不记就统计不到） */
+    if (r === true) { try { b.__mcCarved = (Number(b.__mcCarved) || 0) + 1 } catch { /* 假 bot */ } }
     return r === true
   } catch { return false }
 }
@@ -6357,6 +6377,21 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
      *    这个真正结局 —— 那次跑出 `{"moved":32,"remaining":6.11,"reason":"path-reset"}`，
      *    10 秒明明正常挪了 32 格、只是预算到点，模型看到 "path-reset" 却会以为路被重置了、
      *    以为走不通。时间到点 + 有进展 ⇒ 如实报 budget/timeout。 */
+    /* 🔴 2026-11-02 实机（`shaft/dig` 第 2 趟）：人已经站在目标格（x/z 一致、y 到顶），
+     *   返回却是 `arrived:false` + `reason:unreachable` + hint「真的走不动了」。
+     *   原因：`end` 是失败那一刻的快照，而脱困阶梯 / 补挖的**最后一步**是在那之后才落地的。
+     *   ⇒ 报失败前用**现在**的位置再核一次，真到了就按到达返回（假失败最骗模型：
+     *   它照着重发，等于把已经做完的事再做一遍）。 */
+    let lateOk = false
+    let lateLeft = remaining
+    try {
+      const eNow = b.entity.position
+      const cHNow = Math.hypot(eNow.x - (Number(sp.x) + 0.5), eNow.z - (Number(sp.z) + 0.5))
+      const vNow = Number(eNow.y) - ty
+      const lNow = xz ? Math.hypot(eNow.x - sp.x, eNow.z - sp.z) : eNow.distanceTo(new Vec3(sp.x, ty, sp.z))
+      const onNow = xz ? (cHNow <= arriveUsed + 0.75) : (cHNow <= 0.75 && Math.abs(vNow) <= vertTol)
+      if (onNow && Number(lNow) <= arriveUsed + 1.0) { lateOk = true; lateLeft = Number(Number(lNow).toFixed(2)) }
+    } catch { /* 断线读不到位置就不翻案 */ }
     const takenByOut = preempted ? String(self._moveGenWho ?? 'unknown') : ''
     const reasonOut = preempted ? 'preempted'
       : e?.mcBudgetOut === true ? 'budget'
@@ -6499,10 +6534,11 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
       } catch { return '' }
     }
     return {
-      arrived: false,
-      position: at(end),
+      arrived: lateOk,
+      position: at(lateOk ? (() => { try { return b.entity.position } catch { return end } })() : end),
       ms: Date.now() - t0,
-      remaining,
+      remaining: lateOk ? lateLeft : remaining,
+      ...(lateOk ? { laterArrived: true } : {}),
       ...d,
       via: 'pathfinder',
       /* 🔴 2026-10-27（用户 m02756「这个会话的 dig 和 move 根本不准确」；实测 session-514c21b6：
@@ -6513,8 +6549,8 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
        *    注意别顺手把 `preempted` 也踢掉 —— `check-call-budget` 明写「preempted ⇒ stuck:true」，
        *    `src/water-recovery.mjs` 也靠 `stuck && reason !== 'preempted'` 分流。 */
       ...(takenByOut ? { takenBy: takenByOut } : {}),
-      stuck: Boolean(preempted || exhausted || (noProgress && !timeUp)),
-      reason: reasonOut,
+      stuck: lateOk ? false : Boolean(preempted || exhausted || (noProgress && !timeUp)),
+      reason: lateOk ? undefined : reasonOut,
       /* 这一趟谁按了哪些控制键、forward 与 back 有没有同时按着、位置有没有先增后减。
        *  输出里只留摘要 + 最后 6 个位置采样（完整轨迹太长，模型不需要）。 */
       ...(ctrlAudit ? { ctrlAudit: ctrlAuditOf(ctrlAudit) } : {}),
@@ -6538,7 +6574,9 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
       /* 🔴 2026-10-27（用户 m02756）：`moved` 是**水平**位移（`deltaOf` 里 `hypot(dx,dz)`），
        *    以前这里只写"挪了 N 格" ⇒ 结果里出现 `moved:5.87` 配 `movedVertical:-7` 时，
        *    看着像自相矛盾（"到底走了几格"）。文案写清是水平，垂直由 `vertNote` 单独说。 */
-      hint: `${fellNote(end)}${nm}${escNote}（从 ${startRemaining.toFixed(1)} 格变成 ${remaining.toFixed(1)} 格，水平挪了 ${moved} 格${vertNote(end)}）${adviceFor()}${dugHint()}${airNote()}`,
+      hint: lateOk
+        ? '这一趟结束时还没到，但**最后那一步**（补挖 / 爬上 / 落下）已经把我送到目标了 —— 不用再叫同一次。'
+        : `${fellNote(end)}${nm}${escNote}（从 ${startRemaining.toFixed(1)} 格变成 ${remaining.toFixed(1)} 格，水平挪了 ${moved} 格${vertNote(end)}）${adviceFor()}${dugHint()}${airNote()}`,
     }
   } finally {
     // P0-1：采样器的定时器必须收掉 —— 留着会把进程钉住（也会在返回之后误判"卡住"）。

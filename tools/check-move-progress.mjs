@@ -2638,8 +2638,8 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
   /* 现场（session-514c21b6，用户 m02756「这个会话的 dig 和 move 根本不准确」）：
    * 324 次 mc_move 里 199 次返回都带 `stuck:true`，包括"这一轮时间到、但已经挪了 11 格"的 ——
    * 这个字段原来是**无条件写死 true**，模型一看就以为卡死了、别再试。 */
-  ok(/stuck: Boolean\(preempted \|\| exhausted \|\| \(noProgress && !timeUp\)\)/.test(src),
-    'stuck 只在"真没进展/被抢占/脱困用尽"时为 true（不是无条件写死）')
+  ok(/stuck: lateOk \? false : Boolean\(preempted \|\| exhausted \|\| \(noProgress && !timeUp\)\)/.test(src),
+    'stuck 只在"真没进展/被抢占/脱困用尽"时为 true（不是无条件写死）；后来到了也不算卡住')
   const pathFailAt = src.indexOf("via: 'pathfinder',")
   ok(pathFailAt > 0 && !/^\s*stuck: true,\s*$/m.test(src.slice(pathFailAt, pathFailAt + 400)),
     'pathfinder 失败分支里不再有裸的 `stuck: true`（那种写法让 199/324 次结果都误标卡死）')
@@ -2753,16 +2753,17 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
   /* 🔴 2026-11-05 用户：「只用 allowdig 也像 stair 那样会乱挖 —— 挖几下后换个方向挖台阶」。
    *   原来 `for (const [sx, sz] of cand)` 在“跳不上去”时会继续试下一个方向 ⇒ 每换一次白挖 3 格。
    *   规矩与 stair 一致：方向锁死；跳不上不换方向（那是时机/朝向问题，不是方向问题）。 */
-  ok(/if \(Array\.isArray\(memo\) && \(memo\[0\] \|\| memo\[1\]\) && b\?\.__mcClimbDirFor === memoKey\)/.test(mv2)
+  ok(/const memoOk = Array\.isArray\(memo\) && \(memo\[0\] \|\| memo\[1\]\) && b\?\.__mcClimbDirFor === memoKey/.test(mv2)
     && /cand\.unshift\(cand\.splice\(i, 1\)\[0\]\)/.test(mv2),
     '★ 上一层成功的方向记在 __mcClimbDir，这一层优先用它（记忆带目标指纹）')
-  /* 🔴 2026-11-06 用户：「单 dig 挖台阶有时候会转向」。记忆挂在 bot 上、跨目标不清，
-   *   旧代码无条件 unshift ⇒ 逆着目标方向也照爬。现在只有"目标在头顶那一列"才无条件沿用，
-   *   目标有水平朝向时点积 ≤ 0 就丢掉并清记忆。 */
-  ok(/if \(atCol \|\| \(memo\[0\] \* dx \+ memo\[1\] \* dz\) > 0\) first\(memo\)/.test(mv2)
-    && /first\(\[-memo\[0\], -memo\[1\]\]\)/.test(mv2)
+  /* 🟢 2026-11-02 用户：「挖台阶方向要向着目标点」。
+   *   旧口径是"记忆方向优先，只在记忆与目标反向时才拉回来" ⇒ 会顺着同侧多爬 1~2 格再掉头。
+   *   现在按"这一步是否拉近目标"排序，朝目标的方向永远第一，同分才用记忆定住。 */
+  ok(/const toward = \(d\) => d\[0\] \* tdx \+ d\[1\] \* tdz/.test(mv2)
+    && /cand\.sort\(\(p, q\) => \{/.test(mv2)
+    && /const s = toward\(q\) - toward\(p\)/.test(mv2)
     && /b\.__mcClimbDirFor = memoKey/.test(mv2),
-    '★ 记忆不许和目标的水平朝向相反；偏出去 1 格就先回目标列（zig-zag，不再螺旋）')
+    '★ 挖台阶方向朝着目标点：按"是否拉近目标"排序，同分才用记忆定住')
   ok(/b\.__mcClimbDir = \[sx, sz\]/.test(mv2), '成功了才记方向')
   ok(/refused = \{ why: 'no-lift', dir: \[sx, sz\]/.test(mv2)
     && /跳不上去 = 时机\/朝向问题，换个方向只会白挖 3 格/.test(mv2),
