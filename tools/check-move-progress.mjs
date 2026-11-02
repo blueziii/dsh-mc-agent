@@ -569,7 +569,7 @@ ok(/let attempt = planFrom[\s\S]{0,800}?for \(;;\)/.test(src), '有重试循环�
   ok(/if \(e\?\.mcStuck\)[\s\S]{0,1400}?attempt\+\+[\s\S]{0,200}?continue/.test(src), '采样器判卡 ⇒ 补救没戏就进下一轮脱困')
   ok(/await carveStepAhead\(b, target, \{ ignoreRange: true, only: obstacle, upLevels: 0 \}\)/.test(src) && /carveTries < MOVE_CARVE_TRIES/.test(src),
     '🔴 阶梯之前先试"挖开挡路的台阶"（2026-10-18 实机；审计后改成看眼前障碍；2026-11-05 起不再顺带挖上方——那会变成“纵向两格”）')
-  ok(/if \(obstacle && !goalStraightUpOf\(b, target, noTower === false\)\) \{/.test(src) && !/carveTries === 0/.test(src),
+  ok(/if \(obstacle && !goalStraightUpOf\(b, target\)\) \{/.test(src) && !/carveTries === 0/.test(src),
     '🔴 2026-10-24 审计：没有明确障碍证据就不许挖（旧的 carveTries===0 无条件补挖已删）')
   ok(/only: obstacle/.test(src) && /if \(only\) \{/.test(src),
     '🔴 2026-10-24 审计：补挖直接挖 obstacle 指出的那一格，不再自己重扫')
@@ -1368,9 +1368,14 @@ ok(/四周是|四周全是实心方块|四周没有挡路的方块/.test(cause),
   }
   ok(/mv\.canOpenDoors = true/.test(readFileSync(new URL('../src/plugins.mjs', import.meta.url), 'utf8')),
     '🔴 A* 规划允许穿门（vendor 默认 false ⇒ 只会挖墙）')
-  ok(/const doorTimer = setInterval\(\(\) => \{ openNearbyDoor\(b\)/.test(src)
-    && /try \{ clearInterval\(doorTimer\) \} catch \{\}/.test(src),
-    '移动期间定时探门（收尾一定清掉定时器）')
+  /* 🔴 2026-11-01 用户：「自己实现的功能，效果不好」—— 400ms 定时探门删了。
+   *    vendor 的 `useOne`（包根 index.js:644-646 会 activateBlock）**只为栅栏门**生成
+   *    （movements.js:95-98 只把 `*_gate` 塞进 openable），木门 / 活板门仍得我们按，
+   *    但走前那次已经按过、卡住时还会再按一次 ⇒ 定时轮询纯空转。这里钉住"别再长回来"。 */
+  ok(!/setInterval\(\(\) => \{ openNearbyDoor\(b\)/.test(src)
+    && /const doorOpened = await openNearbyDoor\(b\)/.test(src)
+    && /doorTries\+\+/.test(src),
+    '不再定时探门：开门只在"走前"和"卡住"两处（A* 的 useOne 只覆盖栅栏门）')
   ok(/是\*\*门\*\*：.*mode:"use"/.test(src) && /别挖墙也别挖门/.test(src),
     '失败提示:门用"按开",不是"挖掉"')
 }
@@ -2748,9 +2753,16 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
   /* 🔴 2026-11-05 用户：「只用 allowdig 也像 stair 那样会乱挖 —— 挖几下后换个方向挖台阶」。
    *   原来 `for (const [sx, sz] of cand)` 在“跳不上去”时会继续试下一个方向 ⇒ 每换一次白挖 3 格。
    *   规矩与 stair 一致：方向锁死；跳不上不换方向（那是时机/朝向问题，不是方向问题）。 */
-  ok(/if \(Array\.isArray\(memo\) && \(memo\[0\] \|\| memo\[1\]\)\)/.test(mv2)
+  ok(/if \(Array\.isArray\(memo\) && \(memo\[0\] \|\| memo\[1\]\) && b\?\.__mcClimbDirFor === memoKey\)/.test(mv2)
     && /cand\.unshift\(cand\.splice\(i, 1\)\[0\]\)/.test(mv2),
-    '★ 上一层成功的方向记在 __mcClimbDir，这一层优先用它')
+    '★ 上一层成功的方向记在 __mcClimbDir，这一层优先用它（记忆带目标指纹）')
+  /* 🔴 2026-11-06 用户：「单 dig 挖台阶有时候会转向」。记忆挂在 bot 上、跨目标不清，
+   *   旧代码无条件 unshift ⇒ 逆着目标方向也照爬。现在只有"目标在头顶那一列"才无条件沿用，
+   *   目标有水平朝向时点积 ≤ 0 就丢掉并清记忆。 */
+  ok(/if \(atCol \|\| \(memo\[0\] \* dx \+ memo\[1\] \* dz\) > 0\) first\(memo\)/.test(mv2)
+    && /first\(\[-memo\[0\], -memo\[1\]\]\)/.test(mv2)
+    && /b\.__mcClimbDirFor = memoKey/.test(mv2),
+    '★ 记忆不许和目标的水平朝向相反；偏出去 1 格就先回目标列（zig-zag，不再螺旋）')
   ok(/b\.__mcClimbDir = \[sx, sz\]/.test(mv2), '成功了才记方向')
   ok(/refused = \{ why: 'no-lift', dir: \[sx, sz\]/.test(mv2)
     && /跳不上去 = 时机\/朝向问题，换个方向只会白挖 3 格/.test(mv2),
@@ -3857,8 +3869,12 @@ ok(/emptyNoPath = noPathPending/.test(mvSrcX), 'emptyNoPath 继承上一轮的 N
    *   现在：一次只给 A* 一种上升手段。 */
   const mR = strip(read('../src/movement.mjs'))
   ok(/const applyRiseMode = \(\) => \{/.test(mR), '★ 有 applyRiseMode：把 riseMode 落到 A* 身上')
-  ok(/mv\.allow1by1towers = towerAllowed\s*\n\s*mv\.canDig = carveNoPathOk/.test(mR.replace(/\r\n/g, '\n')),
-    '★ 两边都交给 A*：allow1by1towers 按 allowTower、canDig 按 allowDig（不再互相排斥）')
+  /* 🔴 2026-11-06 通审：`applyRiseMode` 必须改 **A* 当前持有的那份 movements** ——
+   *   地形局部重估会用 `setMovements(mv2)` 把 `mv` 换掉，改 `mv` 等于空操作（改完不生效）。 */
+  ok(/b\?\.pathfinder\?\.movements/.test(mR)
+    && /m\.allow1by1towers = towerAllowed/.test(mR)
+    && /m\.canDig = carveNoPathOk/.test(mR),
+    '★ 两边都交给 A*：allow1by1towers 按 allowTower、canDig 按 allowDig（改的是 A* 当前那份，不是已被换掉的 mv）')
   {
     const iAM = mR.indexOf('const applyRiseMode = () => {')
     const segAM = iAM > 0 ? mR.slice(iAM, mR.indexOf('applyRiseMode()', iAM)) : ''
@@ -3963,6 +3979,31 @@ section('竖井搭路：先到高度再水平走')
       '★ 竖井优先于斜上挖台阶（否则又变成一格格挖）')
     ok(idx3.indexOf('const shaftInfo = shaftLegOf') < idx3.indexOf('const walkTarget = legInfo.split'),
       '★ 分段决策在走路之前')
+  }
+/* ── 2026-11-06 通审（5601-6460 / 3201-4000）：四个"算了但没用 / 用了但算错" ── */
+section('通审：计数、口径、开关、预算')
+  {
+    const mvT = strip(read('../src/movement.mjs'))
+    /* ① upTries 以前只读不写 ⇒ hint 永远「已经往上挖了 0 次」 */
+    ok(mvT.split('upTries++').length - 1 === 1
+      && mvT.split('if (Number(em?.climbed) > 0) upTries = 0').length - 1 === 1,
+      '★ upTries 真的会计数：climbUp 挖了没上去 ++、真升上去了归零（别只读不写）')
+    /* ② noProgress 的口径必须和 remaining 一致（都按 sp 量），别拿"起点→target 的水平距离"比 */
+    ok(/const remaining = remFrom\(end\)/.test(mvT)
+      && /const startLeft = Number\.isFinite\(remFrom\(start\)\) \? remFrom\(start\) : startRemaining/.test(mvT)
+      && /const noProgress = vRose < 0\.75 && moved < 0\.6 && remaining >= startLeft - 0\.3/.test(mvT),
+      '★「没进展」两端用同一口径（起点也按 sp 量）：目标在正上方时不再恒判没进展')
+    /* ③ 挖的开关一个口诀：NoPath 侧的 stepUp 也要认 walkCarveStep */
+    ok(/const carveAllowedNow = carveNoPathOk && ctx\.cfg\?\.walkCarveStep !== false/.test(mvT),
+      '★ 挖的开关只有一个口径：NoPath 侧 stepUp 也认 walkCarveStep（关掉"挖台阶"就真的不挖）')
+    /* ④ climbUp 每层先看预算（一层最坏 ≈2.6 秒，跑不完不许开新层） */
+    ok(/const CLIMB_LV_MIN_MS = 1_500/.test(mvT)
+      && /if \(Number\.isFinite\(leftMs\) && leftMs < CLIMB_LV_MIN_MS\) \{/.test(mvT),
+      '★ climbUp 每层开头判预算：不够一层就收手（以前 12 层一路跑到点）')
+    /* ⑤ xz 的 mine 不许退化成"距离判据的影子" */
+    ok(/const isEndOf = \(g\) => \(fp && typeof g\?\.isEnd === 'function' \? Boolean\(g\.isEnd\(fp\)\) : null\)/.test(mvT)
+      && /const mine = xz\s*\n\s*\? \(isEndOf\(goal\) === true \? true : null\)/.test(mvT.replace(/\r\n/g, '\n')),
+      '★ xz 的 mine：isEnd 只用来确认（GoalXZ 没半径，不能拿它否认），问不到就 null 交给距离')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

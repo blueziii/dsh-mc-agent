@@ -13,11 +13,15 @@
  *   tunnel  地下实心石头里，目标在水平 6 格外的空腔（必须挖穿 5 格）
  *   shaft   地下 1×1 竖井，目标在正上方 6 格（头顶是实心，要一格格挖上去）
  *   cliff   1×1 石柱顶端，四周全空，目标在正上方 6 格（没有任何东西可挖，只能垫）
+ *   pit     脚下是盖板、盖板下面 5 格竖井、目标在井底（往下挖：dropThrough / stepDown）
  *
  * 期望（不是“必须 arrived”，而是“该成的成、该老实拒绝的拒绝”）：
  *   tunnel  dig / dig+tower  应到达；只走 应如实说挖得动但没挖
  *   shaft   dig              应逐次上升（单次 10 秒不够，靠多轮接续）
  *   cliff   tower / dig+tower 应上升 ≥3 格（纯垫柱，dug 必须是 0）
+ *   pit     dig / dig+tower   应落到井底（挖脚下那格）；只走 / tower 应如实不动
+ *           （2026-11-02 补：`dropThrough` / `stepDown` 这两个函数以前**从来没在实机跑过**，
+ *            只有 check-move-progress 里的文字断言，所以专门加了这一档。）
  */
 import { createRequire } from 'node:module'
 import { DEFAULTS } from '../src/core.mjs'
@@ -125,6 +129,9 @@ async function runOnce (label, tgt, mo) {
     /* 挖了哪几格（坐标 + 名字）：`dug=N` 只说明"动了镐"，看不出是谁挖的
        —— 2026-11-01「只走 / 单 tower 也挖了 2 格」就是靠这个定位的。 */
     dugAt: dugList.slice(0, 12), arrived: r?.arrived ?? false, reason: r?.reason ?? (err ? 'ERROR' : '?'),
+    /* 🔴 模型实际读到的就是 `hint` —— 排查"报错准不准"必须看它，不能只看 reason
+       （2026-11-06 用户问「现在报错的输出足够准确吗」时发现脚本根本没记这个字段）。 */
+    hint: r?.hint ?? null,
     err, planTried: r?.planTried ?? [],
     digBy: r?.digLog?.by ?? (() => {
       /* walkTo 抛错（walk-hung / 预算见底）时返回值不存在，`digLog` 拿不到 ——
@@ -150,6 +157,7 @@ async function runOnce (label, tgt, mo) {
   if (err) console.log('    ERR=' + err)
   else console.log(`    arrived=${rec.arrived} reason=${rec.reason} planTried=${JSON.stringify(rec.planTried)} digBy=${JSON.stringify(rec.digBy)}`)
   if (rec.dugAt.length) console.log('    dugAt=' + rec.dugAt.join(' | '))
+  if (!rec.arrived && rec.hint) console.log('    hint: ' + String(rec.hint).slice(0, 600))
   if (rec.digLast.length) console.log('    digLast=' + rec.digLast.join(' | '))
   if (rec.log.length) console.log('    log: ' + rec.log.join(' | '))
   try { bot.pathfinder.stop() } catch {}
@@ -199,6 +207,7 @@ bot.once('spawn', async () => {
     tunnel: { x: sp.x, y: 200, z: sp.z },
     shaft: { x: sp.x + 40, y: 200, z: sp.z },
     cliff: { x: sp.x, y: 200, z: sp.z + 40 },
+    pit: { x: sp.x - 40, y: 200, z: sp.z },
     plain: { x: sp.x + 40, y: 200, z: sp.z + 40 },
   }
 
@@ -229,6 +238,16 @@ bot.once('spawn', async () => {
       await sleep(500)
       fill(cx, cy, cz, cx, cy + 1, cz, 'air')             // 只有脚下两格空，头顶全是石头
       fill(cx, cy + 6, cz, cx, cy + 7, cz, 'air')         // 上方 6 格是空腔 = 目标
+    } else if (sc === 'pit') {
+      /* 往下挖专用场地（2026-11-02 新增）：
+       *   cy+4 … cy-8 是实心岩体，只挖空两处 —— 人站的两格（cy、cy+1）和盖板下面的
+       *   5 格竖井空腔（cy-2 … cy-6）。**cy-1 故意留成盖板**：人要下去只有两条路，
+       *   挖开脚下那格落下去（dropThrough）或挖斜下台阶走下去（stepDown），
+       *   这两个函数以前一次实机都没跑过。井底 cy-7 是实心 ⇒ 目标 (cx, cy-6, cz) 可站。 */
+      fill(cx - 4, cy - 8, cz - 4, cx + 4, cy + 4, cz + 4, SCENE_BLOCK)
+      await sleep(600)
+      fill(cx, cy, cz, cx, cy + 1, cz, 'air')          // 人站的两格（脚下 cy-1 是盖板）
+      fill(cx, cy - 2, cz, cx, cy - 6, cz, 'air')      // 盖板下面的竖井空腔
     } else {
       /* 不要预放目标脚下那块石头：垫柱是自己往脚下垫、一层层垫上去的，
          预放一块实心反而把“该垫的那格”挡住（实测垫到第 3 格就再也垫不上）。 */
@@ -242,11 +261,13 @@ bot.once('spawn', async () => {
     return { cx, cy, cz }
   }
 
-  const scenes = SCENE === 'all' ? ['tunnel', 'shaft', 'cliff'] : [SCENE]
+  const scenes = SCENE === 'all' ? ['tunnel', 'shaft', 'cliff', 'pit'] : [SCENE]
   for (const sc of scenes) {
     const c0 = await build(sc)
 
-    const tgt = sc === 'tunnel' ? { x: c0.cx + 6, y: c0.cy, z: c0.cz } : { x: c0.cx, y: c0.cy + 6, z: c0.cz }
+    const tgt = sc === 'tunnel'
+      ? { x: c0.cx + 6, y: c0.cy, z: c0.cz }
+      : (sc === 'pit' ? { x: c0.cx, y: c0.cy - 6, z: c0.cz } : { x: c0.cx, y: c0.cy + 6, z: c0.cz })
     console.log(`\n=== ${sc} ===  中心 ${c0.cx},${c0.cy},${c0.cz}  目标 ${JSON.stringify(tgt)} 可站=${standable(tgt.x, tgt.y, tgt.z)}`)
 
     /* 垫柱边存在的前提：node.remainingBlocks > 0，来自 countScaffoldingItems()，
@@ -263,7 +284,11 @@ bot.once('spawn', async () => {
       console.log(`\n--- ${sc} / ${mName} ---`)
       for (let round = 1; round <= ROUNDS; round++) {
         const rec = await runOnce(`${sc}/${mName} #${round}`, tgt, mo)
-        if (rec.to[1] >= tgt.y && rec.rest < 2.5) { console.log('    ✔ 到达目标'); break }
+        /* 往上/水平的场景判"够高了"，`pit` 反过来判"够低了" —— 同一个 `rest` 兜底。 */
+        const reached = sc === 'pit'
+          ? (rec.to[1] <= tgt.y + 0.5 && rec.rest < 2.5)
+          : (rec.to[1] >= tgt.y && rec.rest < 2.5)
+        if (reached) { console.log('    ✔ 到达目标'); break }
       }
     }
   }
