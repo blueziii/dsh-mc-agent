@@ -1018,6 +1018,31 @@ repIn(IDX,
   '挖前复查：toBreak 里的格子已经空了就跳过（别挖空气）'
 )
 
+/* ── 2026-11-03（用户：「水平挖中间会卡一小段」「一顿一顿的往前走」） ──────────
+ * A* 的 thinkTimeout（我们设 3500ms）按 **astarContext 累计** 计算：bot 一边沿半截路挖一边走，
+ * 累计算路时间一满 3.5 秒就返回 status='timeout'。goto.js 原来收到 timeout 一律
+ * reject('Timeout') ⇒ 外层认为整趟 walkTo 失败，重开 goto（setGoal → resetPath 清整条 path、
+ * digging=false）⇒ 又从零再算 3.5 秒，这期间人既不挖也不走。
+ * 实机（MC_SLOW_DEBUG=1，355,200,-99 隧道）：`#1 path-reset(3553ms, dug=6)
+ * #2 path-reset(3564ms, dug=6)` —— 每次挖 6 格就白烧 3.5 秒，正是「挖了几格就卡一小段」。
+ * 改法：timeout 但还有半截路（results.path.length > 0）时**别 reject**，让 bot 接着沿它走；
+ * 连一格半截路都没有时才按超时失败上报。 */
+repIn(join(PF_DIR, 'lib', 'goto.js'),
+  `      } else if (results.status === 'timeout') {
+        cleanup(error('Timeout', 'Took to long to decide path to goal!'))
+      } else if (results.path.length === 0) {`,
+  `      } else if (results.status === 'timeout') {
+        /* DSH-PATCH 2026-11-03：A* 把 thinkTimeout 算满时报 timeout，但 bestNode 的半截路
+         * 是能走的。原来一律 reject('Timeout') ⇒ DSH 重开 goto（setGoal → resetPath 清 path），
+         * 又从零再算 3.5 秒，人停在那儿不动 —— 用户看到的「水平挖 5 格就卡一小段」。
+         * 只有连一格半截路都没有时才报错。 */
+        if (!results.path || results.path.length === 0) {
+          cleanup(error('Timeout', 'Took to long to decide path to goal!'))
+        }
+      } else if (results.path.length === 0) {`,
+  'A*/thinkTimeout 超时但还有半截路：接着走，别扔掉整趟'
+)
+
 /* ── 其它补丁只做存在性检查（改法在踩坑档案里，不在这里重放） ───────────── */
 console.log('\n其它已知补丁（只检查）：')
 const checks = [
