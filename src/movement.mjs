@@ -3845,6 +3845,14 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
   let refused = null
   const rounds = Math.max(1, Number(maxLevels) || 1)
   for (let lv = 0; lv < rounds; lv++) {
+    /* 🔵 2026-11-03（用户 m05440 确认的现象）：climbUp 每层**重新看目标高度** —— 已经到目标层就别再往上挖。
+     *   实机（dig+tower 实心对角，目标 y=82）：#2 到层后继续挖到 84、#3 一路挖到 87（超 5 格），#4 又挖回来。
+     *   原来只有"开始爬之前"判一次目标高度，一旦开始就一直爬到 maxLevels。 */
+    const tyStopRaw = Number(target?.y)
+    if (Number.isFinite(tyStopRaw)) {
+      const fyStop = Math.floor(Number(b?.entity?.position?.y))
+      if (fyStop >= Math.floor(tyStopRaw)) break
+    }
     /* 🔴 2026-11-06 通审：这里以前只按 `maxLevels` 跑，**一行预算判断都没有** ——
      *   调用方传 `MOVE_CLIMB_LEVELS = 12`，而一层最坏要挖 2 格（digMs）+ 助跑 90ms
      *   + 抬升 `CLIMB_LIFT_MS`(900) + 等落地 `ms`(700) ≈ 2.6 秒，
