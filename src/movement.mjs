@@ -5268,9 +5268,6 @@ const switchRiseMode = (why, force = false) => {
    *   是石头 ⇒ 每轮都能清出新格子、人却一格没上去（实机：diag2-up/dig+tower 每 4 秒一条
    *   「⛏ 垫柱要头顶净空」，5 次调用 dug=1~4、dy 只 +5）。这里记账：连着清几次**人没升上去**。 */
   let headClearNoRise = 0
-  /* 🔵 2026-11-03 m01007：A* 负缓存（同一站位+同一目标+同一上升方式刚判过没路就不再重算，最多连跳 2 次）。 */
-  let negKey = null
-  let negSkips = 0
   let headClearLastY = null
   /* 🔴 2026-11-03 用户：「dig 上头顶挖一会后会乱挖」。换上升方式会把 headClearNoRise 清零，
    *   于是「清 2 次 → 换档 → 又清 2 次 → 再换档」能一直循环，整趟预算都在挖头顶。
@@ -6055,35 +6052,16 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   ⇒ 垫柱边**存在**、方块充足，不是"没方块/没开 allowTower"。
    *   手=镐 说明垫柱前要临时切成方块：我们每轮清头顶用镐、A* 垫柱切圆石，来回换手
    *   （equip 每次 100~300ms）也是"一卡一卡"的来源之一。 */
-  /* 🔵 2026-11-03 用户 m01007「有缝斜挖 dig+tower 每步很慢」：负缓存（同一站位+同一目标+同一种上升方式
-   *   刚判过"没路"就不再问 A*，最多连跳 2 次）。 */
-  const negKeyOf = () => {
-    try {
-      const p = b.entity.position
-      return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}|`
-        + `${Math.floor(Number(target.x))},${Math.floor(Number(target.y))},${Math.floor(Number(target.z))}|`
-        + `${riseMode}`
-    } catch { return null }
-  }
-  if (negKey && negKey === negKeyOf() && negSkips < 2) {
-    negSkips++
-    noPathPending = true
-    if (attempt < steps.length) {
-      attempt++
-      self.log(`🚧 刚在同一个位置判过没路（不重算）—— 换下一招（第 ${attempt} 级：${steps[attempt - 1] ?? '?'}）`)
-      continue
-    }
-  }
   /* 🔵 探针：goto 花了多久（MC_SLOW_DEBUG 才开，纯输出）。 */
   phaseMark(b, 'walk')
   const work = (() => {
     const tG = Date.now()
     const pr = b.pathfinder.goto(goal)
-    const tag = (bad, err) => {
+    const tag = (bad) => {
       const ms = Date.now() - tG
-      if (process.env.MC_SLOW_DEBUG) { try { process.stderr.write(`[goto] ${ms}ms ${bad ? 'fail' : 'ok'} name=${bad ? (err?.name ?? '?') : '-'} msg=${bad ? String(err?.message ?? '').slice(0, 40) : '-'}\n`) } catch {} }
+      if (process.env.MC_SLOW_DEBUG && ms >= 300) { try { process.stderr.write(`[goto] ${ms}ms ${bad ? 'fail' : 'ok'}\n`) } catch {} }
     }
-    pr?.then?.(() => tag(false), (err) => tag(true, err))
+    pr?.then?.(() => tag(false), () => tag(true))
     return pr
   })()
       work.catch(() => {})                         // race 可能先结束：别让它变成"未处理拒绝"（会炸宿主）
@@ -6427,8 +6405,6 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
         if (e?.name === 'NoPath') {
           try { if (process.env.MC_CARVE_DEBUG) self.log(`[goalfail] name=${e?.name} msg=${e?.message}`) } catch {}
           noPathPending = true
-          negKey = negKeyOf()
-          negSkips = 0
           if (attempt < steps.length) {
             attempt++
             self.log(`🚧 A* 说没路 —— 换下一招（第 ${attempt} 级：${steps[attempt - 1] ?? '?'}）`)
