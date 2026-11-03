@@ -4403,7 +4403,7 @@ export async function escapeMove (b, goal, step, ctx = {}, extra = {}) {
     /* 🔴 2026-11-05 用户：「tower 和 dig 不用挖台阶了，直接垫柱到高度」——
      *   允许垫柱（`noTower === false`）时不许我们挖台阶，上升全交 A* 的 getMoveUp；
      *   否则就是「挖四次、每次纵向两三格」，而垫柱那条边反而没机会。 */
-    if (extra.noTower === false) return { dug: 0 }
+    /* 🔵 2026-11-03：同上，允许垫柱时也照爬（原先是"让给垫柱"，实测实心岩里垫柱慢一倍）。 */
     const myY = (() => { try { return Number(b.entity.position.y) } catch { return null } })()
     const wantY = Number(extra.target?.y)
     if (!Number.isFinite(myY) || !Number.isFinite(wantY) || wantY - myY < 1.5) return { dug: 0 }
@@ -4963,7 +4963,9 @@ const carveNoPathOk = allowDig === true && ctx.cfg?.walkCanDig !== false
    *   但 `planTried` 是在**调用前**记的 ⇒ 日志里会出现一个根本没动手的 `climbUp`，看着像在用。
    *   这里直接在阶梯里摘掉它，`planTried` 就不会再记假动作。 */
   const steps = orderEscapesFor(escapeDiagOf(b, target), escapeStepsFor(allowDig, self.cfg?.walkOwnEscape !== false))
-    .filter((s) => !(noTower === false && s === 'climbUp'))
+    /* 🔵 2026-11-03（用户 m05235「要不然优先用挖的」）：允许垫柱时**不再滤掉** climbUp ——
+     *   挖台阶（climbUp）优先，垫柱退成备选。实心岩里挖台阶每步 2~3 格、垫柱每格还要
+     *   多一次"跳起放一块"（2~4 秒/格），所以挖永远更快；垫柱只在悬空/空腔（cliff）才顶得上。 */
   /* 🔴 2026-11-01 实机（四档同目标连测才暴露）：跨调用“接着升级”只认**目标位置**，
    *   不看这次的开关 —— 先跑“只走”把阶梯推到第 6 级，再跑“allowDig:true”，
    *   它就从第 6 级起（`descend`/`backoff`/`detour`），`breakAhead` 一步都不试，
