@@ -2768,6 +2768,18 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
   ok(/refused = \{ why: 'no-lift', dir: \[sx, sz\]/.test(mv2)
     && /跳不上去 = 时机\/朝向问题，换个方向只会白挖 3 格/.test(mv2),
     '★ 跳不上去就停（不再换下一个方向白挖 3 格）')
+  /* 🔴 2026-11-03 用户：「单 dig、目标在正上方，挖阶梯挖几次后会转向挖 —— 乱挖」。
+   *   `dx/dz` 随人左右跨一格就翻符号，toward 排序每层把方向顶掉 ⇒ 一段阶梯变锯齿、
+   *   来回把落脚面挖空，最后 no-floor / 跳不上去。目标几乎在头顶时必须锁死一条直线。 */
+  ok(/const overheadIsh = /.test(mv2) && /if \(\(!tdx && !tdz\) \|\| overheadIsh\)/.test(mv2),
+    '★ 目标几乎在头顶时不叠 toward 排序（阶梯锁一条直线，不再锯齿/转向）')
+  ok(!/const yaw0 = Number\(b\?\.entity\?\.yaw/.test(mv2),
+    '★ 目标在头顶时不再拿 yaw 猜方向（挖方块/lookAt 每层都会改 yaw）')
+  ok(/\[climbdir\]/.test(mv2) && /ovh=/.test(mv2),
+    'climbUp 每层打印候选方向探针（MC_SLOW_DEBUG 才开）')
+  ok(/pfThinkTimeoutMs \?\? 1500/.test(read('../src/plugins.mjs'))
+    && /pfTickTimeoutMs \?\? 12/.test(read('../src/plugins.mjs')),
+    '★ A* 预算：thinkTimeout 1500 / tickTimeout 12（算不出路更快认输；单次冻结切得更细）')
   ok(/takenBy: String\(self\._moveGenWho \?\? 'unknown'\)/.test(mv2) && /if \(o\.takenBy\) extra\.takenBy = String\(o\.takenBy\)/.test(mv2),
     '被打断时点名是谁领走的号（只报"被另一次移动接管"查不出人）')
   ok(/_moveGenWho = 'init'/.test(read('../src/core.mjs')) && /#beginMove \(who = null\) \{ if \(who\) this\._moveGenWho/.test(read('../src/core.mjs')),

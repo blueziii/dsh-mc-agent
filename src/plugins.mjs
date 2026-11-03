@@ -420,12 +420,39 @@ export async function setupPathfinder (self, { spec = null } = {}) {
      *    （每块多花约 1 秒，还容易把自己挤下边缘）。我们不需要那个姿态：
      *    站在当前格时相邻格就在 1.4 格内，脚下是实地就不会掉。关掉。 */
     b.pathfinder.sneakWhenPlacing = false
-    b.pathfinder.thinkTimeout = Number(self.cfg.pfThinkTimeoutMs ?? 3500)
-    b.pathfinder.tickTimeout = Number(self.cfg.pfTickTimeoutMs ?? 40)
+    b.pathfinder.thinkTimeout = Number(self.cfg.pfThinkTimeoutMs ?? 1500)
+    b.pathfinder.tickTimeout = Number(self.cfg.pfTickTimeoutMs ?? 12)
     b.pathfinder.searchRadius = Number(self.cfg.pfSearchRadius ?? 192)
     /* 🔵 探针（MC_SLOW_DEBUG）：A* 每次规划出来的路径是什么状态、多少步。
      * 用户 2026-11-03「水平挖中间会卡一小段 …差不多是挖了 5 格距离」—— 怀疑 A* 撞 thinkTimeout
      * 只给出一条 partial 半截路（走完半截就要停下来重算，人站着不动）。纯输出。 */
+    /* 🔴 2026-11-03 用户：「还是一卡一卡的，像瞬移」——
+     *   主线程被 A* 切片占住时 physicsTick 会连丢几拍，补发的位置包在别人眼里就是一格一格跳、
+     *   或者被服务器拽回去。三个探针把这件事量化（纯输出，MC_SLOW_DEBUG 才开）：
+     *   ① physicsTick 间隔 >80ms ② 一 tick 位移 >0.75 格 ③ forcedMove（服务器主动挪 bot）。 */
+    if (process.env.MC_SLOW_DEBUG && !b.__mcTickProbe) {
+      b.__mcTickProbe = true
+      let lastTick = Date.now()
+      let lastPos = null
+      b.on('physicsTick', () => {
+        const now = Date.now()
+        const gap = now - lastTick
+        lastTick = now
+        const p = b.entity?.position
+        if (!p) return
+        if (gap > 80) process.stderr.write(`[tick] 主线程卡 ${gap}ms（physicsTick 晚了）\n`)
+        if (lastPos) {
+          const d = Math.hypot(p.x - lastPos.x, p.y - lastPos.y, p.z - lastPos.z)
+          if (d > 0.3) {
+            let busy = '-'
+            try { busy = b.pathfinder?.isMining?.() ? 'dig' : (b.pathfinder?.isBuilding?.() ? 'place' : '-') } catch { /* 假 bot */ }
+            process.stderr.write(`[jump] 一 tick 走了 ${d.toFixed(2)} 格 -> ${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)} 阶段=${b.__mcPhase ?? '-'} busy=${busy}\n`)
+          }
+        }
+        lastPos = { x: p.x, y: p.y, z: p.z }
+      })
+      try { b.on('forcedMove', () => { const q = b.entity?.position; process.stderr.write(`[forced] 服务器把 bot 挪到 ${q?.x?.toFixed(2)},${q?.y?.toFixed(2)},${q?.z?.toFixed(2)}\n`) }) } catch { /* 无此事件 */ }
+    }
     if (process.env.MC_SLOW_DEBUG && !b.__mcPathProbe) {
       b.__mcPathProbe = true
       const t0 = Date.now()
