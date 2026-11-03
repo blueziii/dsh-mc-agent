@@ -4054,13 +4054,11 @@ section('通审：计数、口径、开关、预算')
      *   清出新格子、人却一格没上去（实机 diag2-up/dig+tower：每 4 秒一条，5 次调用 dug=1~4、dy 只 +5）。
      *   现在连着清 2 次人没升上去就停手，并强制换挖台阶（climbUp）。 */
     ok(/let headClearNoRise = 0/.test(mvT)
-      && /let headCleansCall = 0/.test(mvT)
-      && /export const MOVE_HEAD_CLEANS_PER_CALL = \d+/.test(mvT)
-      && /headCleansCall < MOVE_HEAD_CLEANS_PER_CALL/.test(mvT)
+      && /headClearNoRise >= 2\) \{/.test(mvT)
       && /switchRiseMode\(\`头顶清了 \$\{headClearNoRise\} 次人还是没上去/.test(mvT)
+      && /riseMode !== 'dig' && headClearNoRise < 2/.test(mvT)
       && /fyNow > headClearLastY\) headClearNoRise = 0/.test(mvT),
-      '★ 清头顶循环有上限：连着 2 次没升上去就换挖台阶，且**一趟最多清 MOVE_HEAD_CLEANS_PER_CALL 次**'
-      + '（换上升方式不清零 —— 否则"清 2 次→换档→又清 2 次"能一直挖头顶）')
+      '★ 清头顶循环有上限：连着 2 次没升上去就停手并强制换挖台阶（别一直挖头顶 2 格）')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)
