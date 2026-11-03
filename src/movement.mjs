@@ -1641,6 +1641,11 @@ export const MOVE_VENDOR_STUCK_MS = 3_500
  *   `aboveYs`（默认挖**前方那一列**上方 3 层）：它挖出来是竖直的一列、不产生上升，
  *   每轮重排再来一次 ⇒ 4 轮 × 2 格 = 8 格、人一步没动。已把 `upLevels` 默认改成 0。
  *   这一级保持不变：它是“不挖那趟唯一的脱困动作”（2026-10-28 用户批准）。 */
+/* 2026-11-03：「dig 上头顶挖一会后会乱挖」的量化上限 —— 一趟调用里最多清几次头顶。
+ *   清头顶=用镐挖头上的实心岩，在实心岩体里它永远有新格子可挖、人却不一定升得上去；
+ *   以前靠"换上升方式"清零计数，能无限循环。 */
+export const MOVE_HEAD_CLEANS_PER_CALL = 3
+
 export const MOVE_ESCAPES_NODIG = ['repath', 'jump', 'descend', 'clearHead', 'backoff', 'detour']
 /* 2026-10-29（用户：目标在头顶 10 格，工具却只报“前方 stone 挡着、挖开它”）：
  *   往上走（`climbUp`）以前**只挂在“A* 空路径”那条分支**上。真正的常见情形是 A* 给了
@@ -5264,6 +5269,10 @@ const switchRiseMode = (why, force = false) => {
    *   「⛏ 垫柱要头顶净空」，5 次调用 dug=1~4、dy 只 +5）。这里记账：连着清几次**人没升上去**。 */
   let headClearNoRise = 0
   let headClearLastY = null
+  /* 🔴 2026-11-03 用户：「dig 上头顶挖一会后会乱挖」。换上升方式会把 headClearNoRise 清零，
+   *   于是「清 2 次 → 换档 → 又清 2 次 → 再换档」能一直循环，整趟预算都在挖头顶。
+   *   这里再加一个**本趟总次数**上限，换档不清零。 */
+  let headCleansCall = 0
   /* 2026-11-01 用户「只用 A* 的试试」：往上爬（climbUp 斜上挖 / headTower 清头顶再垫）默认全关，
    *   交给 vendor 的 getMoveJumpUp（挖斜上两格+头顶）与 getMoveUp（垫柱）。真要回退成我们自己的实现，
    *   cfg 里设 walkClimbUp: true。两处共用这一个声明（提前到这里避开 TDZ —— 2026-10-31 的 carveNoPathOk 就是这样炸的）。 */
@@ -6016,16 +6025,17 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
        *   在实心岩里是真的能上去，diag2-up/dig 同起点 14.1 对角通过）；换不动（已切满 2 次 /
        *   只开了垫柱）就直接把这轮让给 A*，别再拿预算砸头顶。 */
       if (levelsP > 0 && headClearNoRise >= 2) {
-        if (switchRiseMode(`头顶清了 ${headClearNoRise} 次人还是没上去（一直在挖头顶）`, true)) {
-          headClearNoRise = 0
+        if (headCleansCall < MOVE_HEAD_CLEANS_PER_CALL
+          && switchRiseMode(`头顶清了 ${headClearNoRise} 次人还是没上去（一直在挖头顶）`, true)) {
           continue
         }
       }
-      if (levelsP > 0 && riseMode !== 'dig' && headClearNoRise < 2) {
+      if (levelsP > 0 && riseMode !== 'dig' && headCleansCall < MOVE_HEAD_CLEANS_PER_CALL) {
         let headN = 0
         phaseMark(b, 'head')
         try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: levelsP, keepScaffold: noTower === false }) } catch { headN = 0 }
         if (headN > 0) {
+          headCleansCall++
           /* 记账：跟"上一次清头顶时人在第几层"比 —— 没升上去就是白清。 */
           const fyNow = Math.floor(Number(b?.entity?.position?.y))
           if (headClearLastY != null && Number.isFinite(fyNow) && fyNow > headClearLastY) headClearNoRise = 0
@@ -6049,7 +6059,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
     const pr = b.pathfinder.goto(goal)
     const tag = (bad) => {
       const ms = Date.now() - tG
-      if (process.env.MC_SLOW_DEBUG && ms >= 500) { try { process.stderr.write(`[slow] goto${bad ? '失败' : ''} 用了 ${ms}ms\n`) } catch {} }
+      if (process.env.MC_SLOW_DEBUG && ms >= 300) { try { process.stderr.write(`[goto] ${ms}ms ${bad ? 'fail' : 'ok'}\n`) } catch {} }
     }
     pr?.then?.(() => tag(false), () => tag(true))
     return pr
