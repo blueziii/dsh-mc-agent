@@ -3940,7 +3940,20 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
     const memoKey = (Number.isFinite(tx) && Number.isFinite(tz))
       ? `${Math.floor(tx)},${Math.floor(tz)}`
       : ''
-    if (dx || dz) {
+    /* 🔴 2026-11-03 用户：「单 dig、目标在正上方，挖阶梯挖几次后会转向挖」——
+     *   下面那个 `dx || dz` 分支会按"朝目标"排序，并**排掉正后方**。可目标几乎在头顶时，
+     *   dx/dz 会随着人左右跨一格就翻符号：这一层 +x、下一层 -x，一段阶梯变成锯齿，
+     *   来回在同一两根柱子上挖，把落脚面挖空 ⇒ 后面就 no-floor / 跳不上去（人卡在中间）。
+     *   这种"几乎在头顶"（水平差 < 1.5 格）的目标，阶梯方向必须**锁死一条直线**：
+     *   优先沿用上一层的方向（记忆带目标指纹），没有就按固定顺序挑一个脚下有落脚面的方向。 */
+    const overheadIsh = (() => {
+      try {
+        const ox = Number.isFinite(tx) ? Math.abs(tx - x0) : 0
+        const oz = Number.isFinite(tz) ? Math.abs(tz - z0) : 0
+        return ox < 1.5 && oz < 1.5
+      } catch { return false }
+    })()
+    if (!overheadIsh && (dx || dz)) {
       if (dx) cand.push([dx, 0])
       if (dz) cand.push([0, dz])
       const back0 = [-dx, -dz]
@@ -3955,13 +3968,18 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
         const memo0 = b?.__mcClimbDir
         if (Array.isArray(memo0) && (memo0[0] || memo0[1]) && b?.__mcClimbDirFor === memoKey) front = [memo0[0] || 0, memo0[1] || 0]
         else {
-          const yaw0 = Number(b?.entity?.yaw ?? NaN)
-          if (Number.isFinite(yaw0)) {
-            const fxx = -Math.sin(yaw0), fzz = -Math.cos(yaw0)
-            front = Math.abs(fxx) >= Math.abs(fzz)
-              ? [Math.sign(fxx) || 1, 0]
-              : [0, Math.sign(fzz) || 1]
-          } else front = [1, 0]
+          /* 🔴 2026-11-03 用户：「单 dig、目标在正上方，挖阶梯挖几次后会转向挖 —— 乱挖」。
+           *   老代码这里拿 `b.entity.yaw` 当"前方"，可挖方块和 lookAt **每层都会改 yaw**
+           *   ⇒ 同一个目标、每层的"前方"都可能不一样：这一层往东、下一层往南，
+           *   看起来就是挖了几下突然换个方向挖（阶梯原地打转，人升不上去）。
+           *   现在不看朝向：按固定顺序 [x+, x-, z+, z-] 取第一个"脚下有落脚面"的方向，
+           *   同一目标列每层都一样；都挑不出来才退回 [1,0]，让后面的逐项检查去报具体原因。 */
+          const DIR_ORDER = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+          let picked = null
+          for (const d of DIR_ORDER) {
+            try { if (solidFloorAt(b, fx + d[0], fy, fz + d[1])) { picked = d; break } } catch { picked = null }
+          }
+          front = picked ?? DIR_ORDER[0]
         }
       } catch { front = [1, 0] }
       if (front[0] || front[1]) cand.push(front)
@@ -4013,8 +4031,9 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
       const nearTop = Number.isFinite(tyS) && fy + 1 >= Math.floor(tyS)
       const isTargetCol = (d) => Number.isFinite(tx) && Number.isFinite(tz)
         && fx + d[0] === Math.floor(tx) && fz + d[1] === Math.floor(tz)
-      if (!tdx && !tdz) {
-        /* 已经在目标那一列：没有"朝向"可循，沿用上次成功的方向（记忆按目标指纹校验过）。 */
+      if ((!tdx && !tdz) || overheadIsh) {
+        /* 已经在目标那一列、或目标几乎在头顶：没有"朝向"可循（甚至会随左右跨一格翻符号），
+         *   沿用上次成功的方向（记忆按目标指纹校验过），阶梯才是一条直线而不是锯齿。 */
         if (memoOk) {
           const i = cand.findIndex((c) => c[0] === memo[0] && c[1] === memo[1])
           if (i > 0) cand.unshift(cand.splice(i, 1)[0])
@@ -4045,6 +4064,17 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
           cand.sort((p, q) => (deadDirs.has(`${p[0]},${p[1]}`) ? 1 : 0) - (deadDirs.has(`${q[0]},${q[1]}`) ? 1 : 0))
         }
       } catch { /* 假 bot */ }
+    } catch { /* 假 bot */ }
+    try {
+      if (process.env.MC_SLOW_DEBUG) {
+        const memoDbg = (b?.__mcClimbDirFor === memoKey && Array.isArray(b.__mcClimbDir))
+          ? b.__mcClimbDir.join(',')
+          : '-'
+        process.stderr.write('[climbdir] 层=' + lv + ' 位=' + fx + ',' + fy + ',' + fz
+          + ' 目标列=' + (memoKey || '-') + ' d=' + dx + ',' + dz + ' memo=' + memoDbg
+          + ' ovh=' + (overheadIsh ? 1 : 0)
+          + ' cand=' + cand.map((c) => c.join('')).join('|') + '\n')
+      }
     } catch { /* 假 bot */ }
     let lifted = false
     const markDead = (d) => { try { if (deadDirs && deadDirs.size < 8) deadDirs.add(`${d[0]},${d[1]}`) } catch { /* 假 bot */ } }
@@ -4118,12 +4148,14 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
         else await sleep(60)
       }
       if (upOk) {
+        try { if (process.env.MC_SLOW_DEBUG) process.stderr.write('[climbdir] 上一层成功 ' + sx + ',' + sz + '\n') } catch { /* 假 bot */ }
         lifted = true
         try { b.__mcClimbDir = [sx, sz]; b.__mcClimbDirFor = memoKey; b.__mcDeadDirs?.clear() } catch { /* 假 bot */ }
         /* 真的升上去一层 —— 记一笔，供顶层区分「时间到、还在往上爬」和「真的卡住」。 */
         try { b.__mcClimbed = (Number(b.__mcClimbed) || 0) + 1 } catch { /* 假 bot */ }
         break
       }
+      try { if (process.env.MC_SLOW_DEBUG) process.stderr.write('[climbdir] 跳不上去 ' + sx + ',' + sz + '\n') } catch { /* 假 bot */ }
       refused = { why: 'no-lift', dir: [sx, sz], ...(need.length ? { blockedBy: String(need[0].name) } : { blockedBy: 'air' }) }
       /* 跳不上去 = 时机/朝向问题，换个方向只会白挖 3 格（用户 2026-11-05：「挖几下后换个方向挖台阶」）。 */
       break
