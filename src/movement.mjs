@@ -5258,6 +5258,12 @@ const switchRiseMode = (why, force = false) => {
    *   现在改成：清完只要**人真的上升了**就把额度还回来（连续空清不上升才算用完）。 */
   let headTowerTries = 0
   let headTowerLastY = null
+  /* 🔵 2026-11-03 用户：「dig+tower 上挖斜方实心，如果没到目标水平高度，会一直挖头顶 2 格方块」。
+   *   下面 5990 那段"垫柱前先清头顶"每轮清 1~3 格就 continue、**不计 attempt**，实心岩里头顶永远
+   *   是石头 ⇒ 每轮都能清出新格子、人却一格没上去（实机：diag2-up/dig+tower 每 4 秒一条
+   *   「⛏ 垫柱要头顶净空」，5 次调用 dug=1~4、dy 只 +5）。这里记账：连着清几次**人没升上去**。 */
+  let headClearNoRise = 0
+  let headClearLastY = null
   /* 2026-11-01 用户「只用 A* 的试试」：往上爬（climbUp 斜上挖 / headTower 清头顶再垫）默认全关，
    *   交给 vendor 的 getMoveJumpUp（挖斜上两格+头顶）与 getMoveUp（垫柱）。真要回退成我们自己的实现，
    *   cfg 里设 walkClimbUp: true。两处共用这一个声明（提前到这里避开 TDZ —— 2026-10-31 的 carveNoPathOk 就是这样炸的）。 */
@@ -6002,11 +6008,29 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
       const capP = Number.isFinite(leftP) ? Math.floor((leftP - 1_500) / 1_200) : 3
       const wantP = vertPhase ? Math.min(3, MOVE_TOWER_HEAD_LEVELS_MAX) : 1
       const levelsP = capP <= 0 ? 0 : Math.max(1, Math.min(wantP, capP))
-      if (levelsP > 0) {
+      /* 🔴 2026-11-03 用户：「dig+tower 上挖斜方实心，如果没到目标水平高度，会一直挖头顶 2 格方块」。
+       *   实机（diag2-up/dig+tower）：每 4 秒重复「⛏ 垫柱要头顶净空」→ 重算 → 又清，5 次调用
+       *   dug=1~4 格、dy 只 +5，climbUp 一次都没轮到。原因是这里清完就 `continue`、**不算
+       *   attempt**，而实心岩里头顶永远是石头 ⇒ 下一轮照样能清出新格子，人却一格没升。
+       *   现在连着清 2 次**人没升上去**就不清了：先按"垫柱这档不行"强制换挖台阶（climbUp 斜上挖
+       *   在实心岩里是真的能上去，diag2-up/dig 同起点 14.1 对角通过）；换不动（已切满 2 次 /
+       *   只开了垫柱）就直接把这轮让给 A*，别再拿预算砸头顶。 */
+      if (levelsP > 0 && headClearNoRise >= 2) {
+        if (switchRiseMode(`头顶清了 ${headClearNoRise} 次人还是没上去（一直在挖头顶）`, true)) {
+          headClearNoRise = 0
+          continue
+        }
+      }
+      if (levelsP > 0 && riseMode !== 'dig' && headClearNoRise < 2) {
         let headN = 0
         phaseMark(b, 'head')
         try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: levelsP, keepScaffold: noTower === false }) } catch { headN = 0 }
         if (headN > 0) {
+          /* 记账：跟"上一次清头顶时人在第几层"比 —— 没升上去就是白清。 */
+          const fyNow = Math.floor(Number(b?.entity?.position?.y))
+          if (headClearLastY != null && Number.isFinite(fyNow) && fyNow > headClearLastY) headClearNoRise = 0
+          else headClearNoRise++
+          if (Number.isFinite(fyNow)) headClearLastY = fyNow
           if (!planTried.includes('clearHeadTower')) planTried.push('clearHeadTower')
           self.log(`⛏ 垫柱要头顶净空 —— 先把头顶挖开 ${headN} 格（挖旁边没用，垫不上去），再去垫`)
           continue

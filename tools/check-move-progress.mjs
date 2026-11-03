@@ -4049,6 +4049,16 @@ section('通审：计数、口径、开关、预算')
       && (mvT.match(/markDead\(\[sx, sz\]\)/g) || []).length >= 3
       && /b\.__mcDeadDirs\?\.clear\(\)/.test(mvT),
       '★ 跨调用记忆：climbUp 死方向（没地面/液体/受保护）记在 bot 上、按目标指纹隔离、爬上去就清空')
+    /* 🟢 用户 2026-11-03：「dig+tower 上挖斜方实心，如果没到目标水平高度，会一直挖头顶 2 格方块」。
+     *   那段"垫柱前先清头顶"清完就 continue、**不计 attempt**，实心岩里头顶永远是石头 ⇒ 每轮都能
+     *   清出新格子、人却一格没上去（实机 diag2-up/dig+tower：每 4 秒一条，5 次调用 dug=1~4、dy 只 +5）。
+     *   现在连着清 2 次人没升上去就停手，并强制换挖台阶（climbUp）。 */
+    ok(/let headClearNoRise = 0/.test(mvT)
+      && /headClearNoRise >= 2\) \{/.test(mvT)
+      && /switchRiseMode\(\`头顶清了 \$\{headClearNoRise\} 次人还是没上去/.test(mvT)
+      && /riseMode !== 'dig' && headClearNoRise < 2/.test(mvT)
+      && /fyNow > headClearLastY\) headClearNoRise = 0/.test(mvT),
+      '★ 清头顶循环有上限：连着 2 次没升上去就停手并强制换挖台阶（别一直挖头顶 2 格）')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)
