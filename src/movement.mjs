@@ -1189,7 +1189,7 @@ async function walkToOnce (self, target, { arrive = 1.6, budget = self.cfg.moveB
       remaining: Number(Math.hypot(b.entity.position.x - target.x, b.entity.position.z - target.z).toFixed(2)),
       moved: 0,
       via: 'pathfinder',
-      stuck: true,
+      stuck: false,      // 🔴 审计：时间用完不是"走不通"（MOVE_TIME_REASONS 也这么定义），标 stuck 会让 status 误报 blocked
       reason: 'call-over',
       hint: `这一轮的走路时间已经用完了（单次调用最多 ${budgetSecText()}）—— 直接再叫一次 mc_move 往同一个目标走，会接着走。`,
     }
@@ -2689,7 +2689,13 @@ export async function digOneGuarded (b, blk, { digMs = MOVE_CARVE_DIG_MS } = {})
   try {
     const tool = typeof b.pathfinder?.bestHarvestTool === 'function' ? b.pathfinder.bestHarvestTool(blk) : null
     if (tool && typeof b.equip === 'function') await guarded(b.equip(tool, 'hand'))
+    /* 🔵 探针：挖一格到底花了多久（"挖一格石头要一秒多"要能量出来）。MC_SLOW_DEBUG 才开，纯输出。 */
+    const tD = Date.now()
     const okDig = await guarded(b.dig(blk, true)) === true
+    if (process.env.MC_SLOW_DEBUG) {
+      const ms = Date.now() - tD
+      if (ms >= 500) { try { process.stderr.write(`[slow] dig 一格用了 ${ms}ms（${blk?.name ?? '?'}）\n`) } catch {} }
+    }
     /* 🔴 2026-11-02：`__mcCarved` 以前**只读不写**，于是「超过硬上限被掐断」永远按
      *   「服务端不回包」报（明明在正常挖）。这里是真的挖成一格，累加给上层用。 */
     if (okDig) { try { b.__mcCarved = (Number(b.__mcCarved) || 0) + 1 } catch { /* 假 bot */ } }
@@ -2766,7 +2772,7 @@ export async function bridgeToward (self, b, target, { maxSteps = MOVE_BRIDGE_ST
     placed,
     n,
     dirName,
-    why: r?.ok === false ? (r?.stopped ?? r?.why ?? 'failed') : null,
+    why: r?.ok === false ? (typeof r?.why === 'string' ? r.why : (r?.stopped === true ? 'stopped' : 'failed')) : null,
     note: r?.note ?? r?.hint ?? null,
     raw: r,
   }
@@ -3115,7 +3121,7 @@ export function moveProgressWatcher (b, target, {
       const need = busyKind === 'dig' ? digLeftMsOf(b) : null
       const cap = need != null ? Math.min(busyMaxMs, Math.max(1_000, need + 1_500)) : busyMaxMs
       if (t - busySince < cap) { lastProgressAt = t; return }
-      giveUp(d, { ms: t - lastProgressAt, work: busyKind })
+      giveUp(d, { ms: t - busySince, work: busyKind })   // 🔴 审计：lastProgressAt 上面刚被刷新过，t-它 恒≈0
       return
     }
     if (busyKind === 'air') {
@@ -5435,7 +5441,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
         err.mcExhausted = true
         err.mcBudgetOut = true
         /* 2026-10-31：明说**还剩哪几级没试**（以前只报"升到第 N 级"，AI 不知道后面还有招）。 */
-        err.mcEscapesLeft = steps.slice(Math.max(0, attempt - 1))
+        err.mcEscapesLeft = steps.slice(Math.max(0, attempt))   // 审计：attempt 是"正在试的那级"，它之后才是没试的
         throw err
       }
       /* 🔴 2026-11-02（用户实机：「allowDig+allowTower 搭上去的时候，隔着一块方块挖掉了方块，
@@ -5943,7 +5949,17 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   ⇒ 垫柱边**存在**、方块充足，不是"没方块/没开 allowTower"。
    *   手=镐 说明垫柱前要临时切成方块：我们每轮清头顶用镐、A* 垫柱切圆石，来回换手
    *   （equip 每次 100~300ms）也是"一卡一卡"的来源之一。 */
-  const work = b.pathfinder.goto(goal)
+  /* 🔵 探针：goto 花了多久（MC_SLOW_DEBUG 才开，纯输出）。 */
+  const work = (() => {
+    const tG = Date.now()
+    const pr = b.pathfinder.goto(goal)
+    const tag = (bad) => {
+      const ms = Date.now() - tG
+      if (process.env.MC_SLOW_DEBUG && ms >= 500) { try { process.stderr.write(`[slow] goto${bad ? '失败' : ''} 用了 ${ms}ms\n`) } catch {} }
+    }
+    pr?.then?.(() => tag(false), () => tag(true))
+    return pr
+  })()
       work.catch(() => {})                         // race 可能先结束：别让它变成"未处理拒绝"（会炸宿主）
       // `ctx.watchOpts` 是给离线测试注入假时钟用的（不然一套断言要真等 2.4 秒 × 4 轮）
       /* 2026-10-23 晚（用户实机 mc_sequence 卡死）：脱困阶梯的"重算几次才启动"必须
