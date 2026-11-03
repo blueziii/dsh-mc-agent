@@ -874,6 +874,9 @@ export function movements (self, { terrain = null, digFirst = false, allowDig = 
         if (!ax || !bp || !bpz) return true
         const bx = Math.floor(bp.x)
         const bz = Math.floor(bp.z)
+        /* ⚠️ 2026-11-03 试过「竖直/实心阶段只许挖自己头顶那一列」（`b.__mcVertOnly`）——
+         *   `diag2s-up/dig+tower` 立刻 `dy=0`（连斜上台阶都挖不了 ⇒ A* 完全没路），
+         *   `diag2s-up/dig` 对角也从 14.1 退到 9.1 ⇒ 已回退。别再试同一个方向。 */
         /* 主轴那一列照旧；副轴**朝目标方向**再多给一格 —— 对角台阶要落在"斜上前方"那格，
          * 死守同列会让斜向目标一步都挖不了（2026-11-02 `diag2-up/dig+tower` 对角=0.0）。 */
         if (ax.main === 'z') return bpz.x === bx || (ax.x !== 0 && bpz.x === bx + ax.x)

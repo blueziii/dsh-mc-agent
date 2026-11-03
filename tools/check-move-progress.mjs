@@ -3558,8 +3558,14 @@ section('㉗ 目标在上方、包里又有方块 ⇒ A* 要垫柱子但头顶�
    *   于是 A* 的垫柱边只看到"能垫 1 格"，每格都要重跑整套脱困阶梯（7.9 秒只升 3 格）。
    *   现在按目标高差一次清到够用（6 格井 5.3 秒到顶），这条钉住"别退回死挖 2 层"。 */
   ok(/export const MOVE_TOWER_HEAD_LEVELS_MAX = \d+/.test(src)
-    && /clearHeadForTower\(b, \{ ctx, digMs: 900, levels \}\)/.test(src),
-  '㉗ 清头顶按 levels 一次清够（不是死挖 2 层）', String(/MOVE_TOWER_HEAD_LEVELS_MAX = \d+/.exec(src)))
+    && /clearHeadForTower\(b, \{ ctx, digMs: 900, levels, keepScaffold: true \}\)/.test(src),
+  '㉗ 清头顶按 levels 一次清够（不是死挖 2 层），且清完直接把垫料拿回手上', String(/MOVE_TOWER_HEAD_LEVELS_MAX = \d+/.exec(src)))
+  /* 🔵 2026-11-03 用户 m04981：「最后挖到目标水平但是不垫上去，挖旁边」——
+   *   清完头顶紧接着就是垫柱，中间"切镐挖 / 切圆石垫"来回换手（每次 equip 100~300ms，
+   *   探针实测中间态 `手=netherite_pickaxe`）。 */
+  ok(/keepScaffold = false/.test(src) && /if \(keepScaffold && dug > 0\) \{/.test(src)
+    && /levels: levelsP, keepScaffold: noTower === false/.test(src),
+    '★ 清头顶保留垫料在手：clearHeadForTower(keepScaffold) 清完切到方块，调用点按档位传')
 }
 
 /* 🔴 2026-10-29 实机：`headTower`（头顶挡着先挖开再垫）用了 `carveNoPathOk`，

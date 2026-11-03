@@ -211,9 +211,19 @@ section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做
     console.log('  · 没有 mineflayer-pathfinder/lib/movements.js（跳过）')
   } else {
     const src = readFileSync(mj, 'utf8')
-    ok(/if \(!blockD\.physical && !blockD\.liquid\) return/.test(src)
-      && /if \(!blockC\.physical && !blockC\.liquid\) return/.test(src),
-      'getMoveForward / getMoveJumpUp：前方脚下为空就 return（不垫方块）',
+    ok(/if \(!blockD\.physical && !blockD\.liquid\) \{/.test(src),
+      'getMoveForward：前方脚下为空 ⇒ 走"挖过去/绕"的分支（平走不垫方块）',
+      '重装 vendor 后要重打：node tools/patch-mc-deps.mjs')
+    /* 🔵 2026-11-03 用户选方案 2（「单 dig 带缝斜挖为什么不挖缝」）：
+     *   `blockC`（斜上落脚面）是空气时**分两种情况**：
+     *     · 落点脚下有面（`blockD0` 实心/液体）⇒ 这就是一级现成台阶，直接跳，不垫也不挖；
+     *     · 脚下没面 ⇒ 必须垫一格，只有 `allow1by1towers` 才允许。
+     *   原来不分情况一律走"垫一格"，于是单 dig / 只走 在 return 处把整条斜上跳边也丢了。 */
+    ok(/const blockD0 = this\.getBlock\(node, dir\.x, -1, dir\.z\)[\s\S]{0,80}if \(!\(blockD0\.physical \|\| blockD0\.liquid\)\) \{/.test(src)
+      && /if \(!this\.allow1by1towers\) return/.test(src)
+      && /toPlace\.push\(\{ x: node\.x \+ dir\.x, y: node\.y - 1, z: node\.z \+ dir\.z, dx: 0, dy: 1, dz: 0 \}\)/.test(src)
+      && /if \(blockC\.physical && blockC\.height - block0\.height > 1\.2\) return/.test(src),
+      'getMoveJumpUp：脚下有面就直接跳（单 dig 也能上台阶）；没面才看 allow1by1towers 决定垫不垫',
       '重装 vendor 后要重打：node tools/patch-mc-deps.mjs')
     /* 🔴 2026-10-30 用户：「搭桥不是 A* 的边……allowbridge 也不行吗」——
      *    以前 vendor 真的**不读** `allowBridge`（2026-10-29 我们把"顺手垫一格"整段删了），

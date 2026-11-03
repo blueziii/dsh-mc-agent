@@ -319,6 +319,20 @@ if (!CHECK_ONLY && changed > 0) writeFileSync(IDX, src)
 
 /* ── goto.js：noPath 被当成"到了" ─────────────────────────────────────── */
 const GOTO = join(PF_DIR, 'lib', 'goto.js')
+const MOV = join(PF_DIR, 'lib', 'movements.js')
+
+/* ── 2026-11-03：斜上跳（`getMoveJumpUp`）恢复"允许垫柱时顺手垫一格" ──────────────
+ * 用户 m04440「dig+tower 比单 dig 花的时间还长是不应该的」、m04433「是没有这个功能还是我们没开」。
+ * 2026-10-29 那条「A* 一律不垫方块」把**整条斜上跳边**废掉了：`blockC`（斜上目标格的落脚面）
+ * 是空气时直接 return ⇒ 悬空对角通道/悬崖边 A* 永远 noPath ⇒ 只能落到 DSH 的 climbUp 垂直挖
+ * （dig+tower 又把 climbUp 滤掉 ⇒ 空转到 thinkTimeout，实测 `diag2-up/dig+tower` 48.4s，单 dig 只要 30s）。
+ * 现在按 `allow1by1towers` 分流：允许垫柱时垫一格再跳，不许垫（单 dig / 只走）时照旧 return。
+ * 顺带：`blockC` 是空气时不做 `height` 比较（空气 height 是名义值，会误杀）。 */
+repIn(MOV,
+  '    if (blockC.height - block0.height > 1.2) return // Too high to jump',
+  '    if (blockC.physical && blockC.height - block0.height > 1.2) return // Too high to jump',
+  '斜上跳：blockC 是空气时不做高度比较')
+
 
 function repIn (file, oldText, newText, label) {
   const txt = readFileSync(file, 'utf8')
@@ -585,49 +599,86 @@ repIn(
  *     digEdges=[-1,0,0brk2c31 | 1,0,0brk2c31 | 0,0,1brk2c31 | 0,-1,0brk1c48]
  *   —— 只有平走和往下掉，一条 y+1 的边都没有，所以"斜着挖上去"永远退化成同一层横挖。
  *   修掉之后立刻出现 '1,1,0brk4c17' / '0,1,1brk4c17'。 */
+/* 🔴 2026-11-03 用户 m04544「能不能保留整条斜上跳边」+「我想要寻路，但是有时候垫方块不想要」：
+ *   上游 `getMoveJumpUp` 在"斜上那格是空气"时会顺手垫一格（垫在 blockC 下方），垫了这条边才成立。
+ *   2026-10-29 我们把整段换成一行 `return` ⇒ 连这条斜上跳边一起废掉（悬空对角通道只能落到 climbUp
+ *   垂直挖，dig+tower 还把 climbUp 滤掉 ⇒ 空转到 thinkTimeout，实测比单 dig 还慢）。
+ *   现在按档位分流：
+ *   · dig+tower / tower（allow1by1towers）⇒ 恢复这一垫（照上游写法 push 到 blockC 下方、dy 1）；
+ *   · 单 dig / 只走 ⇒ 照旧 return，一格方块都不放；
+ *   · getMoveForward 的"往前顺手铺路/填坑"**一直**关着 —— 那条才是当年"走平地莫名垫出台阶"。
+ *   另：上游 `blockC.height += 1` 会写回 prismarine-block 缓存（斜上边第二次起永远 return），已删；
+ *   因此垫过之后要跳过高度比较（blockC 是空气时 height 是名义值）。 */
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
-  [ /* 纯上游（重装 deps 后的原始形态） */
-    `    cost += this.exclusionPlace(blockC)
-    blockC.height += 1
-
-    const block0 = this.getBlock(node, 0, -1, 0)
-    if (blockC.height - block0.height > 1.2) return // Too high to jump`,
-    /* 2026-10-29 那条补丁已插入注释之后的形态 */
-    `    cost += this.exclusionPlace(blockC)
-    /* 🔴 2026-10-29 DSH 补丁：这里原本还要在目标格下面“顺手垫一格”，已禁用。 */
-    blockC.height += 1
-
-    const block0 = this.getBlock(node, 0, -1, 0)
-    if (blockC.height - block0.height > 1.2) return // Too high to jump` ],
-  `    cost += this.exclusionPlace(blockC)
-    /* 🔴 2026-10-29 DSH 补丁：这里原本还要在目标格下面“顺手垫一格”，已禁用。 */
-    /* 🔴 2026-11-02 DSH 补丁：上游写回缓存的 'blockC.height += 1' 已删（会污染方块对象，
-     *  让斜上边第二次起就永远 return）。我们也不再垫方块，不需要这个高度补偿。 */
-
-    const block0 = this.getBlock(node, 0, -1, 0)
-    if (blockC.height - block0.height > 1.2) return // Too high to jump`,
-  '斜上边重新生成（别把 blockC.height 加一写回缓存）'
+  [
+    '    if (!blockC.physical) {',
+    '      if (node.remainingBlocks === 0) return // not enough blocks to place',
+    '',
+    '      if (this.getNumEntitiesAt(blockC.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement',
+    '',
+    '      const blockD = this.getBlock(node, dir.x, -1, dir.z)',
+    '      if (!blockD.physical) {',
+    '        if (node.remainingBlocks === 1) return // not enough blocks to place',
+    '',
+    '        if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement',
+    '',
+    '        if (!blockD.replaceable) {',
+    '          if (!this.safeToBreak(blockD)) return',
+    '          cost += this.exclusionBreak(blockD)',
+    '          toBreak.push(blockD.position)',
+    '        }',
+    '        cost += this.exclusionPlace(blockD)',
+    '        toPlace.push({ x: node.x, y: node.y - 1, z: node.z, dx: dir.x, dy: 0, dz: dir.z, returnPos: new Vec3(node.x, node.y, node.z) })',
+    '        cost += this.placeCost // additional cost for placing a block',
+    '      }',
+    '',
+    '      if (!blockC.replaceable) {',
+    '        if (!this.safeToBreak(blockC)) return',
+    '        cost += this.exclusionBreak(blockC)',
+    '        toBreak.push(blockC.position)',
+    '      }',
+    '      cost += this.exclusionPlace(blockC)',
+    '      toPlace.push({ x: node.x + dir.x, y: node.y - 1, z: node.z + dir.z, dx: 0, dy: 1, dz: 0 })',
+    '      cost += this.placeCost // additional cost for placing a block',
+    '',
+    '      blockC.height += 1',
+    '    }',
+  ],
+  [
+    '    if (!blockC.physical && !blockC.liquid) {',
+    '      const blockD0 = this.getBlock(node, dir.x, -1, dir.z)',
+    '      if (!(blockD0.physical || blockD0.liquid)) {',
+    '        /* 🔵 2026-11-03 用户选方案 2：落点脚下**有面**时这就是一级现成的台阶，直接跳就行',
+    '         *  （既不垫也不挖）。原来这里不分情况一律走"顺手垫一格"，于是单 dig / 只走',
+    '         *  （allow1by1towers=false）在 return 处把整条斜上跳边也丢了 ⇒ 连普通台阶都上不去，',
+    '         *  只能靠 DSH 的 climbUp 现挖台阶（实测单 dig 对角场景慢一倍）。 */',
+    '        if (!this.allow1by1towers) return',
+    '        if (node.remainingBlocks === 0) return // not enough blocks to place',
+    '        if (this.getNumEntitiesAt(blockC.position, 0, 0, 0) > 0) return',
+    '        toPlace.push({ x: node.x + dir.x, y: node.y - 1, z: node.z + dir.z, dx: 0, dy: 1, dz: 0 })',
+    '        cost += this.placeCost',
+    '      }',
+    '    }',
+    '',
+    '    if (!blockC.replaceable) {',
+    '      if (!this.safeToBreak(blockC)) return',
+    '      cost += this.breakLabor(blockC)',
+    '      toBreak.push(blockC.position)',
+    '    }',
+    '    cost += this.exclusionPlace(blockC)',
+    '    /* 🔴 2026-10-29 DSH 补丁：这里原本还要在目标格下面“顺手垫一格”，已禁用。 */',
+    "    /* 🔴 2026-11-02 DSH 补丁：上游写回缓存的 'blockC.height += 1' 已删（会污染方块对象，",
+    '     *  让斜上边第二次起就永远 return）。我们也不再垫方块，不需要这个高度补偿。 */',
+  ],
+  '斜上跳边：落点脚下有面就直接跳（单 dig 也能上台阶），没面才看 allow1by1towers 决定垫不垫'
 )
 
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
-  `    if (!blockC.physical) {
-      if (node.remainingBlocks === 0) return // not enough blocks to place
-
-      if (this.getNumEntitiesAt(blockC.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement`,
-  `    if (!blockC.physical && !blockC.liquid) return`,
-  'A* 不垫方块：jumpUp 目标格'
-)
-
-repIn(
-  join(PF_DIR, 'lib', 'movements.js'),
-  `      if (!blockD.physical) {
-        if (node.remainingBlocks === 1) return // not enough blocks to place
-
-        if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement`,
-  `    if (!blockD.physical && !blockD.liquid) return`,
-  'A* 不垫方块：jumpUp 脚下那格'
+  '    if (blockC.height - block0.height > 1.2) return // Too high to jump',
+  '    if (blockC.physical && blockC.height - block0.height > 1.2) return // Too high to jump',
+  '斜上跳：blockC 是空气时不做高度比较'
 )
 
 /* ── 2026-10-30：move「挖脚下 / 斜下挖」由"禁止"改成"加价" ─────────────

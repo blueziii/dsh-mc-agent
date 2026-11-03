@@ -3756,7 +3756,7 @@ export function towerHeadBlocked (b) {
  *   上面又是实心 ⇒ 每一格都要跑完整套脱困阶梯（breakAhead→repath→jump→backoff→detour 全 noPath）
  *   ⇒ 7.9 秒只升 3 格。一次把这一列清到目标高度（`levels`），A* 就能一路垫上去：
  *   同样的井 6 格一次清完 → 8.7 秒升 6 格直接到达。 */
-export async function clearHeadForTower (b, { ctx = null, digMs = MOVE_CARVE_DIG_MS, levels = 2 } = {}) {
+export async function clearHeadForTower (b, { ctx = null, digMs = MOVE_CARVE_DIG_MS, levels = 2, keepScaffold = false } = {}) {
   const e = b?.entity?.position
   if (!e) return 0
   const fx = Math.floor(e.x), fy = Math.floor(e.y), fz = Math.floor(e.z)
@@ -3805,6 +3805,16 @@ export async function clearHeadForTower (b, { ctx = null, digMs = MOVE_CARVE_DIG
     else why.push(`y+${dy} ${nm} 挖失败(digOneGuarded)`)
   }
   if (!dug) { try { b.__mcHeadWhy = why.join(' / ') || '没有要清的格' } catch { /* 忽略 */ } }
+  /* 🔵 2026-11-03 用户 m04981 之后的小优化：清完头顶紧接着就是要垫柱 ⇒ 直接把垫料拿到手上。
+   *   原来流程是「切镐挖头顶 → 换回圆石垫柱 → 又切镐挖下一格」，每次 equip 100~300ms，
+   *   实测探针里 `手=netherite_pickaxe` 就是这一来一回的中间态。 */
+  if (keepScaffold && dug > 0) {
+    try {
+      const ids = scaffoldingItemIds(b)
+      const it = (b?.inventory?.items?.() ?? []).find((i) => Array.isArray(ids) && ids.includes(i.type))
+      if (it && b.heldItem?.type !== it.type) await b.equip(it, 'hand')
+    } catch { /* 换不上就算了，A* 自己还会换 */ }
+  }
   return dug
 }
 /** 一次调用里连续往上挖几层（每层都要挖 2 格 + 跳，太多会吃光预算）。 */
@@ -4770,7 +4780,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
   if (!xz && !gp.portal) {
     const tyReal = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
     const curY = Number(b?.entity?.position?.y)
-    if (tyReal != null && Number.isFinite(curY) && Math.abs(curY - tyReal) > vertTol) {
+    if (tyReal != null && Number.isFinite(curY) && Math.abs(curY - tyReal) >= 0.9) {
       gp = { ...gp, y: tyReal, radius: 0, tightenedY: true }
     }
   }
@@ -5209,7 +5219,7 @@ const switchRiseMode = (why, force = false) => {
     const levels = Math.min(MOVE_TOWER_HEAD_LEVELS_MAX, Math.max(2, climbNeed), budgetCap)
     dbg.levels = String(levels)
     let n = 0
-    try { n = await clearHeadForTower(b, { ctx, digMs: 900, levels }) } catch (e) { n = 0; dbg.why = `抛错:${e?.message ?? e}` }
+    try { n = await clearHeadForTower(b, { ctx, digMs: 900, levels, keepScaffold: true }) } catch (e) { n = 0; dbg.why = `抛错:${e?.message ?? e}` }
     n = Number(n) || 0
     /* 只有真挖到才算一次额度；空跑（一格都没挖到）不吃额度，否则两次空转就把整趟机会废掉。 */
     if (n > 0) { headTowerTries++; headTowerLastY = fy0 }
@@ -5428,7 +5438,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
          *   平走/平挖时 A* 手里也有垫柱边，偶尔试一次垫柱就会 `place_no_rise`；
          *   把它当"净空不够"去清 y+1/y+2/y+3 纯属白挖（水平走根本用不到）。
          *   ⇒ 只有**目标确实在上方 2 格以上**（真要垫柱往上）才清头顶。 */
-        && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 2) {
+        && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 1) {
         placeFailsCleared = placeFails
         const headN = await towerHeadClearOnce()
         if (headN > 0) {
@@ -5446,7 +5456,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
        * 🔴 2026-11-02 用户实机（dig+tower）：「一直挖头顶方块，**就算是水平挖**」——
        *   原来 noPath 一来就清头顶，可**水平/往下走**根本不需要净空 ⇒ 平挖一路白挖 y+2/y+3。
        *   ⇒ 只有目标确实在上方 2 格以上才清。 */
-      if (emptyNoPath && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 2) {
+      if (emptyNoPath && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 1) {
         if (process.env.MC_MOVE_DEBUG) self.log(`🔎 诊断：emptyNoPath=true（attempt=${attempt}，headTowerTries=${headTowerTries}，tower=${noTower === false}，dig=${carveNoPathOk}）`)
         const headN = await towerHeadClearOnce()
         if (headN > 0) {
@@ -5810,6 +5820,35 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
       return walkable(1) && walkable(2)
     } catch { return false }
   })()
+  /* 🔵 2026-11-03 用户：「减少 A* 重算量是不是更好…A* 的重算是不是在水平最好用」——
+   *   实测正好印证：竖井里**清 3 格再重算一次** 13.1 秒，改成**清 1 格就重算** 17.2 秒
+   *   （竖直阶段 A* 本来就无路，重算纯属空烧 3.5 秒 thinkTimeout）；
+   *   可对角通道（斜上方有现成路）清 1 格就重算反而更快（20.8 → 19.0 秒）。
+   *   ⇒ 分开处理：**纯竖直/实心**（朝目标实心、斜上也没路）多挖少算；**斜上有通道**少挖多算。
+   *   `slopeOpen` = 斜上一格（脚位+头位）能走 ⇒ A* 有斜上跳边、重算有意义。 */
+  const slopeOpen = (() => {
+    try {
+      const p = b?.entity?.position
+      if (!p) return false
+      const fx = Math.floor(p.x); const fy = Math.floor(p.y); const fz = Math.floor(p.z)
+      const tx = Math.floor(Number(target?.x)); const tz = Math.floor(Number(target?.z))
+      if (!Number.isFinite(tx) || !Number.isFinite(tz)) return false
+      const sx = Math.sign(tx - fx) || 0; const sz = Math.sign(tz - fz) || 0
+      if (sx === 0 && sz === 0) return false
+      const solid = (dx, dy, dz) => {
+        const q = b?.blockAt?.(new Vec3(fx + dx, fy + dy, fz + dz))
+        return Boolean(q) && q.boundingBox === 'block'
+      }
+      return !solid(sx, 1, sz) && !solid(sx, 2, sz)
+    } catch { return false }
+  })()
+  const vertPhase = !openToward && !slopeOpen     // 竖直/实心：A* 在这里没有可用边，重算几乎全是浪费
+  /* 🔵 2026-11-03 用户 m04939：「dig+tower 实心对角 上到目标水平面会挖周围方块是什么问题」——
+   *   实心岩里垫柱边要求头顶 +2/+3 净空（没有），A* 只剩"挖 toBreak 侧面格"这条路 ⇒
+   *   人一边被垫一边往旁边挖，挖点散开就是"挖周围"。
+   *   ⇒ 竖直/实心阶段只许 A* 挖**自己头顶那一列**（x/z 与人同列），侧面一律拒：
+   *     A* 要么垫柱、要么如实 NoPath（脱困阶梯再上）。我们自己的
+   *     `clearHeadForTower` / `carveStepAhead` 不走 `safeToBreak`，不受这条影响。 */
   /* 🔴 2026-11-03 用户 m04325「有空隙斜挖，dig+tower 会一卡一卡的，很明显」——
    *   抬挖价（×5）本来是为了"能垫就别挖"，代价是 A* 里"挖"与"垫"的代价差拉大 ⇒ 要展开更多节点，
    *   每次都顶满 `thinkTimeout` 同步算好几秒（人站着不动 = 肉眼"一卡一卡"）。
@@ -5867,19 +5906,33 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
   if (attempt === 0 && noTower === false) {
     const tyLvP = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
     const fyLvP = Math.floor(Number(b?.entity?.position?.y))
-    if (tyLvP != null && tyLvP - fyLvP >= 2) {
+    if (tyLvP != null && tyLvP - fyLvP >= 1) {
       const leftP = (() => { try { return Number(self?.callLeft?.()) } catch { return Number.NaN } })()
-      const capP = Number.isFinite(leftP) ? Math.max(1, Math.floor((leftP - 1_500) / 1_200)) : 3
-      const levelsP = Math.max(1, Math.min(3, MOVE_TOWER_HEAD_LEVELS_MAX, capP))
-      let headN = 0
-      try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: levelsP }) } catch { headN = 0 }
-      if (headN > 0) {
-        if (!planTried.includes('clearHeadTower')) planTried.push('clearHeadTower')
-        self.log(`⛏ 垫柱要头顶净空 —— 先把头顶挖开 ${headN} 格（挖旁边没用，垫不上去），再去垫`)
-        continue
+      /* 🔵 2026-11-03 用户选 **B 方案（只减噪）** + 「减少 A* 重算量」：
+       *   竖直/实心阶段（`vertPhase`）一次清最多 3 格才回去重算 —— A* 在这儿本来就无路，
+       *   每清 1 格就重算等于白烧 3.5 秒 thinkTimeout（实测竖井 13.1 → 17.2 秒）；
+       *   斜上方有现成通道（`!vertPhase`）时只清 1 格就重算 —— 那儿的重算真能算出新路
+       *   （实测对角通道 20.8 → 19.0 秒）。
+       *   到目标层立刻停：上面的 `tyLvP - fyLvP >= 2` 门保证差 1 格以内不再清头顶。
+       *   预算紧时（`capP <= 0`）连这一格也不挖，别把整趟预算花在头顶。 */
+      const capP = Number.isFinite(leftP) ? Math.floor((leftP - 1_500) / 1_200) : 3
+      const wantP = vertPhase ? Math.min(3, MOVE_TOWER_HEAD_LEVELS_MAX) : 1
+      const levelsP = capP <= 0 ? 0 : Math.max(1, Math.min(wantP, capP))
+      if (levelsP > 0) {
+        let headN = 0
+        try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: levelsP, keepScaffold: noTower === false }) } catch { headN = 0 }
+        if (headN > 0) {
+          if (!planTried.includes('clearHeadTower')) planTried.push('clearHeadTower')
+          self.log(`⛏ 垫柱要头顶净空 —— 先把头顶挖开 ${headN} 格（挖旁边没用，垫不上去），再去垫`)
+          continue
+        }
       }
     }
   }
+  /* 2026-11-03 探针实测（已删探针体）：`[scaf] 邻居=10 垫柱边=1~2 allow1x1=true remain=256 手=netherite_pickaxe`
+   *   ⇒ 垫柱边**存在**、方块充足，不是"没方块/没开 allowTower"。
+   *   手=镐 说明垫柱前要临时切成方块：我们每轮清头顶用镐、A* 垫柱切圆石，来回换手
+   *   （equip 每次 100~300ms）也是"一卡一卡"的来源之一。 */
   const work = b.pathfinder.goto(goal)
       work.catch(() => {})                         // race 可能先结束：别让它变成"未处理拒绝"（会炸宿主）
       // `ctx.watchOpts` 是给离线测试注入假时钟用的（不然一套断言要真等 2.4 秒 × 4 轮）
