@@ -18,9 +18,18 @@ const MAX_EVENTS = 400
 const MAX_TRAIL = 120
 const TRAIL_MS = 200
 
-/** 从调用栈里找出“是谁按的键”：优先给 `文件:行`，跳过本文件自己的帧。 */
+/**
+ * 从调用栈里找出“是谁按的键”：优先给 `文件:行`，跳过本文件自己的帧。
+ *
+ * ⚠️ 只取前 4 帧：vendor 每 tick 都会重设一遍 forward/jump，`setControlState` 一秒能被调上百次，
+ * 抓 10 帧全栈光 `prepareStackTrace` 就能吃掉几秒 CPU（2026-11-03 CPU profile 实测：一趟 8 分钟的长测里
+ * callerTagOf+prepareStackTrace 占了主线程 11 秒 CPU 中的近 6 秒），表现就是 physicsTick 掉拍 = 玩家看到「一卡一卡」。
+ */
 function callerTagOf () {
+  const lim = Error.stackTraceLimit
+  Error.stackTraceLimit = 4
   const st = String(new Error().stack ?? '')
+  Error.stackTraceLimit = lim
   const lines = st.split('\n')
   for (let i = 1; i < lines.length; i++) {
     const m = lines[i].match(/[\\/]([A-Za-z0-9_.-]+\.m?js):(\d+)/)
@@ -44,10 +53,21 @@ export function startCtrlAudit (bot) {
   let lastSample = 0
   let stopped = null
 
+  const lastState = new Map() // key -> 上一次记下的 on/off
+  let dupes = 0
   bot.setControlState = (key, on) => {
     try {
-      events.push({ t: Date.now() - t0, by: callerTagOf(), key: String(key), on: Boolean(on) })
-      if (events.length > MAX_EVENTS) events.shift()
+      const k = String(key)
+      const v = Boolean(on)
+      /* 值跟上次一样就不是「按键」，只是 vendor 每 tick 重设一遍：不记、也不抓栈。
+       * 只保留真正的按下/松开（状态跳变），这正是审计要的「谁在什么时候按了哪个键」。 */
+      if (lastState.get(k) === v) {
+        dupes++
+      } else {
+        lastState.set(k, v)
+        events.push({ t: Date.now() - t0, by: callerTagOf(), key: k, on: v })
+        if (events.length > MAX_EVENTS) events.shift()
+      }
     } catch { /* 记日志绝不能影响移动 */ }
     return orig(key, on)
   }
@@ -129,6 +149,7 @@ export function startCtrlAudit (bot) {
       trailFrom: first,
       trailTo: last,
       moves: backSteps,
+      dupes,
       trail: trail.length > 24 ? trail.slice(-24) : trail
     }
   }
