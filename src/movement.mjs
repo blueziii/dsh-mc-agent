@@ -4785,6 +4785,19 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
     }
   }
   /* 命中传送门时不能再用 GoalXZ（它只锁水平两维）—— 得升级成三维精确格，人才能站进去。 */
+  /* 🔵 2026-11-03（用户 m05293「dig+tower 能不能分成两段，垂直+水平，因为垂直垫柱很快」）：
+   *   2026-11-03 用户 m05305「先不选最优，空隙也按垂直+水平」⇒ 不再要求 vertPhase，dig+tower 一律两段。
+   *   先把 A* 的 goal 换成 `GoalY(目标层)` —— h 只看 |y 差|、水平走不减少 h，
+   *   ⇒ 这一段它只会"往上垫/挖"，不会一边上一边横着漂。到层后 fyR === tyR，这段不再触发，
+   *   自然进入第二段：完整三维 goal，水平挖过去。 */
+  try {
+    const tyR = Math.floor(Number(target?.y))
+    const fyR = Math.floor(Number(b?.entity?.position?.y))
+    if (noTower === false && goals?.GoalY && Number.isFinite(tyR) && tyR - fyR >= 2 && attempt === 0) {
+      goal = new goals.GoalY(tyR)
+      self.log(`🧗 第一段：只往上垫到第 ${tyR} 层（差 ${tyR - fyR} 格）—— 到层再水平挖过去`)
+    }
+  } catch { /* 假 bot */ }
   const GoalXZ = (xz && !gp.portal) ? goals?.GoalXZ : null
   let goal = GoalXZ
     ? new GoalXZ(gp.x, gp.z)
