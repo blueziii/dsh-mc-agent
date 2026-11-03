@@ -4042,6 +4042,13 @@ section('通审：计数、口径、开关、预算')
       && /Math\.max\(120, Math\.min\(260, Math\.round\(leftSearchMs \/ 1000 \* 26\)\)\)/.test(mvT)
       && !/Math\.min\(900, Math\.ceil\(dS\) \* digUnit \+ 20\)/.test(mvT),
       '★ searchRadius 按剩余时间封顶（10 秒 ⇒ ≤260 分），不许再按目标距离无上限放大')
+    /* 🟢 跨调用记忆：同一目标连叫 5 次时，上一趟已证明"没地面/液体/受保护"的方向排到最后，
+     *   别再每趟重试（实测 diag2s-up/dig+tower 47024ms → 41210ms）。只记方向、最多 8 个、爬上去就清空。 */
+    ok(/b\?\.__mcDeadDirsFor === memoKey && b\.__mcDeadDirs instanceof Set/.test(mvT)
+      && /deadDirs\.size < 8/.test(mvT)
+      && (mvT.match(/markDead\(\[sx, sz\]\)/g) || []).length >= 3
+      && /b\.__mcDeadDirs\?\.clear\(\)/.test(mvT),
+      '★ 跨调用记忆：climbUp 死方向（没地面/液体/受保护）记在 bot 上、按目标指纹隔离、爬上去就清空')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

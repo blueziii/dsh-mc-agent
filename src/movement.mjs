@@ -3882,6 +3882,7 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
      *     没记忆就用当前朝向；候选只取"前 + 左右"，同样排除正后方。 */
     const tx = Number(target?.x), tz = Number(target?.z)
     const cand = []
+    let deadDirs = null
     const dx = Number.isFinite(tx) ? Math.sign(Math.round(tx - x0)) : 0
     const dz = Number.isFinite(tz) ? Math.sign(Math.round(tz - z0)) : 0
     /* 🔴 2026-11-06 用户：「单 dig 挖台阶有时候会转向」——
@@ -3985,18 +3986,30 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
           return mq - mp
         })
       }
+      /* 🟢 跨调用记忆 ——
+       *   同一个目标连续叫 5 次时，上一趟已经证实"这个方向没地面/是液体/受保护"的候选，
+       *   这一趟直接排到最后，不必每趟再花 1~2 秒重试一遍（地形检查仍逐项做，世界变了照样能翻回来）。
+       *   只在升上去时清空；换目标（memoKey 变了）就换一个新的 Set。 */
+      try {
+        if (b?.__mcDeadDirsFor === memoKey && b.__mcDeadDirs instanceof Set) deadDirs = b.__mcDeadDirs
+        else { b.__mcDeadDirs = new Set(); b.__mcDeadDirsFor = memoKey; deadDirs = b.__mcDeadDirs }
+        if (deadDirs.size) {
+          cand.sort((p, q) => (deadDirs.has(`${p[0]},${p[1]}`) ? 1 : 0) - (deadDirs.has(`${q[0]},${q[1]}`) ? 1 : 0))
+        }
+      } catch { /* 假 bot */ }
     } catch { /* 假 bot */ }
     let lifted = false
+    const markDead = (d) => { try { if (deadDirs && deadDirs.size < 8) deadDirs.add(`${d[0]},${d[1]}`) } catch { /* 假 bot */ } }
     for (const [sx, sz] of cand) {
       const ax = fx + sx, az = fz + sz
       const floor = at(ax, fy, az), feet = at(ax, fy + 1, az), head = at(ax, fy + 2, az)
       if (!floor || !feet || !head) { refused = refused ?? { why: 'no-world' }; continue }
-      if (!solidFloorAt(b, ax, fy, az)) { refused = refused ?? { why: 'no-floor', blockedBy: floor?.name ?? '?' }; continue }
+      if (!solidFloorAt(b, ax, fy, az)) { markDead([sx, sz]); refused = refused ?? { why: 'no-floor', blockedBy: floor?.name ?? '?' }; continue }
       const need = [feet, head].filter((x) => x.boundingBox === 'block')
       const liquid = need.find((x) => /water|lava/.test(String(x.name)))
-      if (liquid) { refused = refused ?? { why: 'liquid', blockedBy: String(liquid.name) }; continue }
+      if (liquid) { markDead([sx, sz]); refused = refused ?? { why: 'liquid', blockedBy: String(liquid.name) }; continue }
       const prot = need.find((x) => !diggableBlock(x))
-      if (prot) { refused = refused ?? { why: 'protected', blockedBy: String(prot.name) }; continue }
+      if (prot) { markDead([sx, sz]); refused = refused ?? { why: 'protected', blockedBy: String(prot.name) }; continue }
       if (need.length && !allowDig) { refused = refused ?? { why: 'no-dig' }; continue }
       let dug = 0
       let failed = false
@@ -4058,7 +4071,7 @@ export async function climbUp (b, target, { allowDig = true, ctx = null, ms = CL
       }
       if (upOk) {
         lifted = true
-        try { b.__mcClimbDir = [sx, sz]; b.__mcClimbDirFor = memoKey } catch { /* 假 bot */ }
+        try { b.__mcClimbDir = [sx, sz]; b.__mcClimbDirFor = memoKey; b.__mcDeadDirs?.clear() } catch { /* 假 bot */ }
         /* 真的升上去一层 —— 记一笔，供顶层区分「时间到、还在往上爬」和「真的卡住」。 */
         try { b.__mcClimbed = (Number(b.__mcClimbed) || 0) + 1 } catch { /* 假 bot */ }
         break
