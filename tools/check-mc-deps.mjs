@@ -219,11 +219,13 @@ section('6. pathfinder 底层一律不垫方块（垫/搭全交给 DSH 显式做
      *     · 落点脚下有面（`blockD0` 实心/液体）⇒ 这就是一级现成台阶，直接跳，不垫也不挖；
      *     · 脚下没面 ⇒ 必须垫一格，只有 `allow1by1towers` 才允许。
      *   原来不分情况一律走"垫一格"，于是单 dig / 只走 在 return 处把整条斜上跳边也丢了。 */
-    ok(/const blockD0 = this\.getBlock\(node, dir\.x, -1, dir\.z\)[\s\S]{0,80}if \(!\(blockD0\.physical \|\| blockD0\.liquid\)\) \{/.test(src)
-      && /if \(!this\.allow1by1towers\) return/.test(src)
+    ok(/if \(!blockC\.physical && !blockC\.liquid\) \{/.test(src)
+      && /if \(this\.allow1by1towers && node\.remainingBlocks !== 0\) \{/.test(src)
+      && /if \(this\.getNumEntitiesAt\(blockC\.position, 0, 0, 0\) === 0\) \{/.test(src)
       && /toPlace\.push\(\{ x: node\.x \+ dir\.x, y: node\.y - 1, z: node\.z \+ dir\.z, dx: 0, dy: 1, dz: 0 \}\)/.test(src)
-      && /if \(blockC\.physical && blockC\.height - block0\.height > 1\.2\) return/.test(src),
-      'getMoveJumpUp：脚下有面就直接跳（单 dig 也能上台阶）；没面才看 allow1by1towers 决定垫不垫',
+      && /if \(blockC\.physical && blockC\.height - block0\.height > 1\.2\) return/.test(src)
+      && !/const blockD0 = this\.getBlock/.test(src),
+      'getMoveJumpUp：斜上格是空气 ⇒ 照样成边（台阶能上）；允许垫柱时顺手垫一块造落脚面（⚠️ 不许加「blockD0 必须有面」的门，空塔往上爬时它也是空气 ⇒ 整条边消失）',
       '重装 vendor 后要重打：node tools/patch-mc-deps.mjs')
     /* 🔴 2026-10-30 用户：「搭桥不是 A* 的边……allowbridge 也不行吗」——
      *    以前 vendor 真的**不读** `allowBridge`（2026-10-29 我们把"顺手垫一格"整段删了），

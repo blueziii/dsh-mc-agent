@@ -5933,6 +5933,25 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   ⇒ 垫柱边**存在**、方块充足，不是"没方块/没开 allowTower"。
    *   手=镐 说明垫柱前要临时切成方块：我们每轮清头顶用镐、A* 垫柱切圆石，来回换手
    *   （equip 每次 100~300ms）也是"一卡一卡"的来源之一。 */
+  /* 🔵 2026-11-03（试验，用户 m05091「做一版试试」）：dig+tower 的上升段**目标是 y**。
+   *   垫柱只改 y、不带来水平位移；挖穿只改水平、不带来高度 ⇒ 同一个三维 goal 里这两件事必然交替
+   *   （实测 `diag2s-up/dig+tower` 对角只有 4.2，人一路垫一下、漂一下，挖点散开）。
+   *   ⇒ 目标在头顶 ≥2 格、朝目标实心且斜上也堵着（`vertPhase`）时，这一段把 goal 换成
+   *     `goals.GoalY(目标层)`：h 只看 |y 差|、水平走不减少 h ⇒ A* 只会往上垫/挖；到层就 resolve，
+   *     下一轮 `tyLvP - fyLvP < 2` 不再进这里，水平段照常交给三维 goal。
+   *   ⚠️ 2026-11-03 首测（3 次/项）：`shaft/dig+tower` 13.0s dy=12（持平）、`diag2s-up/dig+tower`
+   *     dy=10 但对角 3.6（原 4.2，没改善）、`cliff/tower` 3.6s → **17.1s（明显回归）**、
+   *     `diag2s-down/dig+tower` 对角 5.7。⇒ **默认关**（`walkTowerTwoPhase === true` 才生效），
+   *     留着开关等以后有别的思路再试。 */
+  try {
+    const tyR = Number.isFinite(Number(target?.y)) ? Math.floor(Number(target.y)) : null
+    const fyR = Math.floor(Number(b?.entity?.position?.y))
+    if (ctx?.cfg?.walkTowerTwoPhase === true && noTower === false && goals?.GoalY
+      && tyR != null && tyR - fyR >= 2 && vertPhase && attempt === 0) {
+      goal = new goals.GoalY(tyR)
+      try { self.log(`🧗 这一段只往上垫到第 ${tyR} 层（先不管水平），到层再挖过去`) } catch { /* 假 self */ }
+    }
+  } catch { /* 假 bot */ }
   const work = b.pathfinder.goto(goal)
       work.catch(() => {})                         // race 可能先结束：别让它变成"未处理拒绝"（会炸宿主）
       // `ctx.watchOpts` 是给离线测试注入假时钟用的（不然一套断言要真等 2.4 秒 × 4 轮）

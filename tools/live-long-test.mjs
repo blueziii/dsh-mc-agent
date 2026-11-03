@@ -55,7 +55,12 @@ const req = createRequire('C:/Users/BLUE/.dsh/profiles/desktop/vendor/mc-deps/no
 const Vec3 = req('vec3')
 
 const DEADLINE = Date.now() + MINUTES * 60_000
-const MC = new McBot({ ...DEFAULTS, instanceId: 'livelong', logFile: 'tmp-livelong.log' })
+/* 实验开关（只在本测试进程里改 cfg，不动产品默认值）：
+ *   MC_TOWER_COST=0.3 ⇒ walkTowerCost（垫一格的价格）；MC_DIG_COST=… ⇒ walkDigCost。 */
+const CFG = { ...DEFAULTS }
+if (process.env.MC_TOWER_COST) CFG.walkTowerCost = Number(process.env.MC_TOWER_COST)
+if (process.env.MC_DIG_COST) CFG.walkDigCost = Number(process.env.MC_DIG_COST)
+const MC = new McBot({ ...CFG, instanceId: 'livelong', logFile: 'tmp-livelong.log' })
 
 const say = (c) => { try { MC.bot?.chat(c) } catch {} }
 const fill = (x1, y1, z1, x2, y2, z2, blk) => say(`/fill ${x1} ${y1} ${z1} ${x2} ${y2} ${z2} ${blk}`)
