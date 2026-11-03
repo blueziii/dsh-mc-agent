@@ -421,8 +421,17 @@ export async function setupPathfinder (self, { spec = null } = {}) {
      *    站在当前格时相邻格就在 1.4 格内，脚下是实地就不会掉。关掉。 */
     b.pathfinder.sneakWhenPlacing = false
     b.pathfinder.thinkTimeout = Number(self.cfg.pfThinkTimeoutMs ?? 3500)
-    b.pathfinder.tickTimeout = 40
+    b.pathfinder.tickTimeout = Number(self.cfg.pfTickTimeoutMs ?? 40)
     b.pathfinder.searchRadius = Number(self.cfg.pfSearchRadius ?? 192)
+    /* 🔵 探针（MC_SLOW_DEBUG）：A* 每次规划出来的路径是什么状态、多少步。
+     * 用户 2026-11-03「水平挖中间会卡一小段 …差不多是挖了 5 格距离」—— 怀疑 A* 撞 thinkTimeout
+     * 只给出一条 partial 半截路（走完半截就要停下来重算，人站着不动）。纯输出。 */
+    if (process.env.MC_SLOW_DEBUG && !b.__mcPathProbe) {
+      b.__mcPathProbe = true
+      const t0 = Date.now()
+      b.on('path_update', (r) => process.stderr.write(`[path] +${Date.now() - t0}ms status=${r?.status} 步=${r?.path?.length ?? '?'}\n`))
+      b.on('path_reset', (reason) => process.stderr.write(`[reset] +${Date.now() - t0}ms reason=${reason}\n`))
+    }
     self._pf = mod
     self.pfReady = true
     return true

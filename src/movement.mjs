@@ -3004,6 +3004,13 @@ export function moveBusyKind (b) {
 }
 
 /**
+ * 🔵 探针（`MC_SLOW_DEBUG`）：记下"这会儿在等哪一步"，供 `[stall]` 那行带出来。
+ * 用户 2026-11-03：「水平挖中间会卡一小段」—— 只看到"人没动"不够，得知道是卡在
+ * A*（walk）/ 补挖（carve）/ 清头顶（head）/ 上升（up）/ 下降（down）/ 脱困（escape）。
+ */
+export function phaseMark (b, name) { try { b.__mcPhase = name } catch { /* 假 bot */ } }
+
+/**
  * 当前正在挖的**那一块**还要多久（ms）；拿不到就 `null`。
  * 🔴 2026-10-29：宽限必须按"这块"算 —— 手挖一格石头 7.5 秒、黑曜石更久，
  *    用一个固定值去截断就必然把"正在挖"误判成"卡住"。
@@ -3061,6 +3068,12 @@ export function moveProgressWatcher (b, target, {
   let lastProgressAt = now()
   let busySince = null
   let stuckInfo = null
+  /* 🔵 探针（MC_SLOW_DEBUG）：位置多久没变了（用户 2026-11-03「水平挖中间会卡一小段」）。 */
+  let stallPos = null
+  let stallPosAt = now()
+  let stallLogAt = 0
+  let backBest = Infinity
+  let backLogAt = 0
   const promise = new Promise((_, rej) => { reject = rej })
   // ⚠️ 竞速可能先结束、采样器随后才 reject ⇒ 自己吞掉，否则是"未处理拒绝"（会炸宿主）。
   promise.catch(() => {})
@@ -3094,6 +3107,41 @@ export function moveProgressWatcher (b, target, {
     if (stopped) return
     const t = now()
     const d = distOf()
+    /* 🔵 探针（MC_SLOW_DEBUG）：人"没动"了多久 —— 用户 2026-11-03「水平挖中间会卡一小段」。
+     * 只报 >400ms 的静默、每 700ms 最多一条；带出阶段（谁在等）+ busy（挖/放/空中）+ 正在挖哪块。 */
+    if (process.env.MC_SLOW_DEBUG) {
+      try {
+        const p = b?.entity?.position
+        if (p) {
+          if (!stallPos || Math.hypot(p.x - stallPos.x, p.y - stallPos.y, p.z - stallPos.z) >= 0.05) {
+            stallPos = { x: p.x, y: p.y, z: p.z }
+            stallPosAt = t
+          } else {
+            const gap = t - stallPosAt
+            if (gap >= 400 && t - stallLogAt >= 700) {
+              stallLogAt = t
+              const bk = moveBusyKind(b)
+              const tb = b?.targetDigBlock
+              const tbx = tb ? `${tb.name}@${Math.floor(tb.position?.x)},${Math.floor(tb.position?.y)},${Math.floor(tb.position?.z)}` : '-'
+              process.stderr.write(`[stall] 人没动 ${gap}ms 阶段=${b?.__mcPhase || '?'} busy=${bk || 'none'} 挖=${tbx} 剩余=${d.toFixed(1)} 位=${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}\n`)
+            }
+          }
+        }
+      } catch { /* 假 bot */ }
+    }
+    /* 🔵 探针（MC_SLOW_DEBUG）：人是不是"往回退"了 —— 用户 2026-11-03「dig+tower 还会往后退，
+     * 差不多是挖了 5 格距离」。离目标的最短距离刷新后再比它大 1.2 格以上就报一条（带阶段/位置）。 */
+    if (process.env.MC_SLOW_DEBUG) {
+      try {
+        if (d < backBest) backBest = d
+        else if (d - backBest >= 1.2 && t - backLogAt >= 900) {
+          backLogAt = t
+          const p = b?.entity?.position
+          const pp = p ? `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}` : '?'
+          process.stderr.write(`[back] 退回去了 ${(d - backBest).toFixed(1)} 格（最近过 ${backBest.toFixed(1)}）阶段=${b?.__mcPhase || '?'} 位=${pp}\n`)
+        }
+      } catch { /* 假 bot */ }
+    }
     /* 🔴 2026-10-23 审计（A[1]）：以前 `d <= arrive + 0.6` **也算"有进展"并直接 return**。
      *    于是人已经在目标 1.2 格内被门框/台阶/碰撞箱挡住、**一格没动**时，这个条件永远成立：
      *    进度时钟被反复刷新、路径失效次数检查被跳过 ⇒ 脱困阶梯永远不启动，干等预算耗尽。
@@ -4465,6 +4513,7 @@ export async function escapeMove (b, goal, step, ctx = {}, extra = {}) {
        * cells: 4 而不是默认 2 —— 卡在"起跑空间"里时眼前 2 格常是空气，真正的墙在 3 格开外，
        * 默认 2 格探不到 ⇒ 这一级白跑一趟（实机 tunnel 单 dig：breakAhead 挖 0 格、白耗一级）。
        * 挖到**第一根**柱子就停（`carveStepAhead` 里 dug>0 即 break），不会一路挖穿。 */
+      phaseMark(b, 'carve')
       const n = await carveStepAhead(b, extra.target, { ignoreRange: true, upLevels: 0, cells: 4 })
       /* 🔴 2026-10-27：只挖通一格（另一格挖不动）时把"还差哪一块"带回去，日志里说清楚。 */
       const half = n > 0 ? (b?.__carveHalfOpen ?? null) : null
@@ -5248,6 +5297,7 @@ const switchRiseMode = (why, force = false) => {
     const levels = Math.min(MOVE_TOWER_HEAD_LEVELS_MAX, Math.max(2, climbNeed), budgetCap)
     dbg.levels = String(levels)
     let n = 0
+    phaseMark(b, 'head')
     try { n = await clearHeadForTower(b, { ctx, digMs: 900, levels, keepScaffold: true }) } catch (e) { n = 0; dbg.why = `抛错:${e?.message ?? e}` }
     n = Number(n) || 0
     /* 只有真挖到才算一次额度；空跑（一格都没挖到）不吃额度，否则两次空转就把整趟机会废掉。 */
@@ -5440,6 +5490,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
      *   （只在 `path_update {status:'noPath'}` 时置真）上 ⇒ **永远等不到** ⇒ 一步都不动。
      *   ⇒ 收到 `NoPath` 也算“没路”，下一轮把兜底阶梯放出来。 */
     let noPathPending = false
+    phaseMark(b, 'loop')
     for (;;) {
       /* 🔴 2026-10-24 通审：**脱困阶梯以前不吃预算** —— 每升一级要白等一个 vendor stuck 周期
        *    （3.5 秒）再加动作时间（跳 0.32 / 退 0.42 / 绕 1.6 秒），七级能磨出三十秒，
@@ -5469,6 +5520,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
          *   ⇒ 只有**目标确实在上方 2 格以上**（真要垫柱往上）才清头顶。 */
         && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 1) {
         placeFailsCleared = placeFails
+        phaseMark(b, 'head')
         const headN = await towerHeadClearOnce()
         if (headN > 0) {
           carved += headN
@@ -5487,6 +5539,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
        *   ⇒ 只有目标确实在上方 2 格以上才清。 */
       if (emptyNoPath && (Number(target?.y) - Number(b?.entity?.position?.y)) >= 1) {
         if (process.env.MC_MOVE_DEBUG) self.log(`🔎 诊断：emptyNoPath=true（attempt=${attempt}，headTowerTries=${headTowerTries}，tower=${noTower === false}，dig=${carveNoPathOk}）`)
+        phaseMark(b, 'head')
         const headN = await towerHeadClearOnce()
         if (headN > 0) {
           carved += headN
@@ -5547,6 +5600,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
         repathCount++
         markPlan(attempt + 1, step)
         self.log(`🔁 走不动了 → 第 ${attempt} 步：${escapeTextOf(step)}（执行顺序 ${steps.indexOf(step) + 1}/${steps.length}，累计重算 ${repathCount} 次）`)
+        phaseMark(b, 'escape')
         const em = await escapeMove(b, goal, step, ctx, { target, allowDig, goals, noTower })
         /* 🔴 2026-11-06 通审：`upTries` 以前**全仓没有一处 `++`**（只在提示文案里被读），
          *   于是 hint 永远说「已经往上挖了 0 次」。现在按"这一级真的跑过 climbUp"计数：
@@ -5896,6 +5950,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
     const fyLv = Math.floor(Number(b?.entity?.position?.y))
     if (tyLv != null && tyLv - fyLv >= 1) {
       let up0 = null
+      phaseMark(b, 'up')
       try { up0 = await climbUp(b, target, { allowDig: true, ctx, maxLevels: 1 }) } catch { up0 = null }
       if (up0?.ok === true || Number(up0?.climbed) > 0) {
         climbToLevelTries = 0                                // 真升上去了 ⇒ 额度归零
@@ -5949,6 +6004,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
       const levelsP = capP <= 0 ? 0 : Math.max(1, Math.min(wantP, capP))
       if (levelsP > 0) {
         let headN = 0
+        phaseMark(b, 'head')
         try { headN = await clearHeadForTower(b, { ctx, digMs: MOVE_CARVE_DIG_MS, levels: levelsP, keepScaffold: noTower === false }) } catch { headN = 0 }
         if (headN > 0) {
           if (!planTried.includes('clearHeadTower')) planTried.push('clearHeadTower')
@@ -5963,6 +6019,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
    *   手=镐 说明垫柱前要临时切成方块：我们每轮清头顶用镐、A* 垫柱切圆石，来回换手
    *   （equip 每次 100~300ms）也是"一卡一卡"的来源之一。 */
   /* 🔵 探针：goto 花了多久（MC_SLOW_DEBUG 才开，纯输出）。 */
+  phaseMark(b, 'walk')
   const work = (() => {
     const tG = Date.now()
     const pr = b.pathfinder.goto(goal)
@@ -6057,6 +6114,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
                  *   ⇒ 差 ≥2 格且这趟能垫柱时，**先清头顶净空再推**（一次清够，别一格一格磨）。 */
                 if (noTower === false && dyR >= 2 && Date.now() - t0 < budget - 1_500) {
                   try {
+                    phaseMark(b, 'head')
                     const headN = await towerHeadClearOnce()
                     if (Number(headN) > 0) {
                       carved += Number(headN)
@@ -6139,6 +6197,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
            *   漏了卡住侧那道 `walkCarveStep !== false` 门 —— 用户把"挖台阶"关掉之后，
            *   这一条路照样挖。挖的开关必须一个口诀，没有两处。 */
           const carveAllowedNow = carveNoPathOk && ctx.cfg?.walkCarveStep !== false
+          phaseMark(b, 'up')
           const su = await stepUp(b, target, { allowDig: carveAllowedNow, ctx, cells: MOVE_CARVE_CELLS })
           if (su.tried) {
             stepUpTries++
@@ -6169,6 +6228,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
             downTries++
             try { ctx.stopPathing?.(b) } catch {}
             await sleep(60)
+            phaseMark(b, 'down')
             const dr = await dropThrough(b, target, { allowDig: carveNoPathOk, ctx })
             if (dr.ok) {
               if (!descendTried.includes('dropDown')) descendTried.push('dropDown')
@@ -6179,6 +6239,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
               attempt++
               continue
             }
+            phaseMark(b, 'down')
             const sd = await stepDown(b, target, { allowDig: carveNoPathOk, ctx })
             if (sd.ok) {
               if (!descendTried.includes('stepDown')) descendTried.push('stepDown')
@@ -6217,6 +6278,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
             carveTries++
             try { ctx.stopPathing?.(b) } catch {}
             await sleep(60)
+            phaseMark(b, 'carve')
             const n = await carveStepAhead(b, target, { ignoreRange: true, only: obstacle, upLevels: 0 })
             const half = b.__carveHalfOpen
             if (n > 0) {
@@ -6433,6 +6495,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
            *    跳不上去（头顶被堵）时：允许挖就只清挡在落脚位置上方的**那一格**，
            *    不允许挖就如实报 no-headroom，交给后面的阶梯/AI 决定绕行。 */
           if (stepUpTries < STEP_UP_TRIES) {
+            phaseMark(b, 'up')
             const su = await stepUp(b, target, { allowDig: carveAllowed, ctx, cells: MOVE_CARVE_CELLS })
             if (su.tried) {
               stepUpTries++
@@ -6462,6 +6525,7 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
               carveTries++
               try { ctx.stopPathing?.(b) } catch {}
               await sleep(60)
+              phaseMark(b, 'carve')
               const n = await carveStepAhead(b, target, { ignoreRange: true, only: obstacle, upLevels: 0 })
               /* 2026-10-23 晚（用户实机）：眼前根本没东西可挖时，别再来第二次 ——
                * 每一次"挖 0 格"都要白等一个 vendor stuck 周期（3.5 秒），
