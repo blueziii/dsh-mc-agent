@@ -60,6 +60,7 @@ const DEADLINE = Date.now() + MINUTES * 60_000
 const CFG = { ...DEFAULTS }
 if (process.env.MC_TOWER_COST) CFG.walkTowerCost = Number(process.env.MC_TOWER_COST)
 if (process.env.MC_DIG_COST) CFG.walkDigCost = Number(process.env.MC_DIG_COST)
+if (process.env.MC_DETOUR_MAX) CFG.walkDigDetourMax = Number(process.env.MC_DETOUR_MAX)
 const MC = new McBot({ ...CFG, instanceId: 'livelong', logFile: 'tmp-livelong.log' })
 
 const say = (c) => { try { MC.bot?.chat(c) } catch {} }
