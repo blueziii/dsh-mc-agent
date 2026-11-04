@@ -4144,16 +4144,17 @@ export function apply(ctx, rawConfig) {
     name: 'mc_move',
     description: '移动。mode="walk" 走过去（自动避障；**在水里会自动改成"直接游"**）；mode="fly" 创造直飞（约 9 格/秒，会先发飞行权限包）；'
       + 'mode="jump" 原地跳一下（不需要坐标）；\n'
-      + '在水里不用选模式：给 x/y/z 就自己游过去（默认一直浮在水面，不会沉下去）。\n'
+      + '在水里给 x/y/z 就自己游过去（默认浮在水面）。\n'
       + 'mode="boat" 开船（先 use 上船；下船用 mode="dismount"）。\n'
       + '🔴 **一次只走 10 秒**。没走到返回 `arrived:false`+`remaining`+`hint`——**再叫一次往同一目标走**。\n'
-      + '🔴 默认不垫方块、不搭路：垒柱子要 `allowTower:true`，路断了自动铺桥要 `allowBridge:true`。\n'
+      + '🔴 默认不垫不搭：垒柱要 `allowTower:true`，铺桥要 `allowBridge:true`。\n'
+      + '🧗 四种走法：默认只走｜`allowDig`=挖着走｜`allowTower`=垫柱往上｜都开=最慢但最能到（垫柱优先）。只开 tower 在实心山里没路；1×1 竖井别开（会填井）。\n'
       + '🪜 **一格台阶会先试着踩上去**（量真实位移才算成功）；头顶被堵就跳不起来 —— 允许挖时只清头顶那格，不挖报 `stepUp.why="no-headroom"`。\n'
       + '🔴 走不动会分清挡着的是什么：`entity`（实体，别挖）/ `lava`（岩浆，挖不动）/ `waiting_chunks`（区块没加载，等）/ `stepUp`（一格台阶）。\n'
-      + '🧭 `intent` 决定"到"的标准：near（默认）/ stand / interact（2.2 格）/ same-level。\n'
+      + '🧭 `intent` 决定"到"的标准（interact=2.2 格内）。\n'
       + '🔴 **长程赶路只给 x/z 就够**（`xz:true`）：不必猜高度，按"到那一列"算（哪一层由寻路器定）—— 别编个 y 把自己挂半空。**给了 y 就按 y 走，xz 被忽略。**\n'
       + '🔴 没走到时报 `pathLen`（剩余路径几格）+ `estCalls`（还要几次调用，一次 10 秒 ≈ 24 格）。\n'
-      + '🔴 结果带 `above`（头顶净空 `headroom` / `canJump`）：`canJump:false` 就是跳不起来（`note` 说哪格堵着），先挖开或换落点，别反复 `mode:"jump"`。\n'
+      + '🔴 `above.canJump:false` = 跳不起来（`note` 说哪格堵着），先挖开或换落点，别反复 `mode:"jump"`。\n'
       + '🔴 掐断报 `reason:"walk-hung"`（服务端不回包，不是路不通）；`digStalled`=挖方块卡在回包上。别原样第三次重叫。\n'
       + '🔴 **卡住时按执行顺序升**（`planStep`=最后试的那级）：允许挖（`allowDig:true`，或自动升级那一遍）时 开门→重算→跳→**挖**→后退→绕行→垫柱；'
       + '不挖的那一遍**没有"挖"这一级**：开门→重算→跳→后退→绕行→垫柱。'
@@ -4162,12 +4163,12 @@ export function apply(ctx, rawConfig) {
       x: { type: 'number' },
       y: { type: 'number', description: '脚底那格：y=77 站在 76 的方块上，不是 76 那块' },
       z: { type: 'number' },
-      mode: { type: 'string', description: 'walk / fly / jump / boat（创造缺省 fly；jump 不需坐标；boat 要先上船；水里自动游，没有 swim）' },
+      mode: { type: 'string', description: 'walk / fly / jump / boat（创造缺省 fly；jump 不用坐标；boat 先上船；水里自动游）' },
       allowDig: { type: 'boolean', description: '走路时**允不允许挖**方块（默认 false = 不挖，只绕路；绕不过去会自动改成挖穿再走一遍）；写 true = 第一遍就允许挖，而且**按最短路线挖**（该挖就挖，不再优先绕路）' },
       xz: { type: 'boolean', description: '长程赶路：只给 x/z 就够（按"到那一列"算 GoalXZ）；给了 y 就按 y 走；写 false 等于必须给 y；fly/boat 仍必须给 y' },
       budgetMs: { type: 'number', description: '走路/游泳最长时间（≤10000）' },
       waterRecover: { type: 'boolean', description: '游不动时自动找出口（默认 true）' },
-      allowTower: { type: 'boolean', description: '允许垫 1×1 柱往上爬（默认不许，容易摔死）' },
+      allowTower: { type: 'boolean', description: '允许垫 1×1 柱往上爬（默认不许，容易摔死）。只在垂直上升、头顶开阔时开；1×1 竖井别开（会填井）' },
       allowBridge: { type: 'boolean', description: '允许自动搭路：A* 没路时朝目标铺方块造桥（直线、一次≤4格、血量<8 不铺）' },
       intent: { type: 'string', description: 'near（默认）/ stand / interact / same-level' },
     },
