@@ -63,7 +63,23 @@ if (process.env.MC_DIG_COST) CFG.walkDigCost = Number(process.env.MC_DIG_COST)
 if (process.env.MC_DETOUR_MAX) CFG.walkDigDetourMax = Number(process.env.MC_DETOUR_MAX)
 const MC = new McBot({ ...CFG, instanceId: 'livelong', logFile: 'tmp-livelong.log' })
 
-const say = (c) => { try { MC.bot?.chat(c) } catch {} }
+/* 🔴 2026-11-04：服务器会因为**命令发太密**把 bot 直接踢掉（`disconnect.spam`，实测 1.2 秒 40 条就踢）。
+ *   被踢之后 mineflayer 只会把 `bot.entity` 弄脏，上层看到的全是"机器人不在线"，特别能误导人。
+ *   所以你下面所有命令都走 `say()`：**排队 + 间隔**（默认 120ms，`MC_CMD_GAP` 可调），并且在
+ *   发现掉线后停止发送（不然一堆"发不出去"的命令只会把日志刷满）。 */
+const SAY_GAP = Number(process.env.MC_CMD_GAP ?? 120)
+let _sayQueue = Promise.resolve()
+let _lastSayAt = 0
+const say = (c) => {
+  _sayQueue = _sayQueue.then(async () => {
+    const wait = Math.max(0, _lastSayAt + SAY_GAP - Date.now())
+    if (wait > 0) await sleep(wait)
+    _lastSayAt = Date.now()
+    if (!MC.bot?.entity) return
+    try { MC.bot.chat(c) } catch {}
+  })
+  return _sayQueue
+}
 const fill = (x1, y1, z1, x2, y2, z2, blk) => say(`/fill ${x1} ${y1} ${z1} ${x2} ${y2} ${z2} ${blk}`)
 const posOf = () => MC.bot.entity.position.floored()
 const xyz = (p) => `${p.x},${p.y},${p.z}`
@@ -599,6 +615,14 @@ async function setupPlayer () {
 async function main () {
   console.log(`连接 ${HOST}:${PORT} …（计划跑 ${MINUTES} 分钟）`)
   await MC.connect({ host: HOST, port: PORT, auth: { mode: 'offline', name: NAME } })
+  /* 被踢/掉线要说清楚原因：不挂这两个事件，上层只能看到 `bot.entity` 变空，误判成"插件 bug" */
+  const _b0 = MC.bot
+  _b0?.on?.('kicked', (r) => {
+    let why = ''
+    try { why = r?.value?.translate?.value ?? JSON.stringify(r) } catch { why = String(r) }
+    console.log(`  ⚠ 服务器把 bot 踢了：${why}（命令发太密 / 没 OP 都可能）`)
+  })
+  _b0?.on?.('end', (r) => { if (r !== 'disconnect.quitting') console.log(`  ⚠ 连接断了：${r}`) })
   for (let i = 0; i < 60 && !inGame(); i++) await sleep(500)
   if (!inGame()) throw new Error('连不上 / 没 spawn')
   console.log(`已上线：${posOf().toJSON?.() ?? ''}｜先给装备再搭台`)
