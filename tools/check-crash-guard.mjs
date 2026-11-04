@@ -11,7 +11,12 @@
  *   ③ 环境变量关掉 → 一条都不拦；
  *   ④ 卸载之后监听恢复原样。
  */
-import { installRejectionGuard, uninstallRejectionGuard, refreshRejectionGuard, rejectionGuardStats, PATH_REJECTION_NAMES } from '../src/crash-guard.mjs'
+import { readFileSync } from 'node:fs'
+import {
+  installRejectionGuard, uninstallRejectionGuard, refreshRejectionGuard, rejectionGuardStats,
+  PATH_REJECTION_NAMES, BENIGN_REJECTION_MESSAGE_RES,
+} from '../src/crash-guard.mjs'
+import { guardDigRejections } from '../src/plugins.mjs'
 
 let pass = 0
 let fail = 0
@@ -162,6 +167,77 @@ section('⑦ 名字不在白名单、但带 mcTimeout/mcAborted 标记：也拦�
     ok(got.length === 1 && got[0] === 'Error', '不带标记的 Error 照样转交（不掩盖真错）', JSON.stringify(got))
     uninstallRejectionGuard()
   })
+}
+
+section('⑧ issue #5：按消息认 `Digging aborted`（name 只是普通 Error，标记也没有）')
+{
+  await withCleanProcess(async () => {
+    const got = []
+    process.on('unhandledRejection', (r) => got.push(String(r?.message ?? r?.name ?? '')))
+    installRejectionGuard({ enabled: true, log: () => {} })
+
+    ok(BENIGN_REJECTION_MESSAGE_RES.length === 1 && BENIGN_REJECTION_MESSAGE_RES[0].source === '^Digging aborted$',
+      '按消息认的只有一句（^Digging aborted$）', BENIGN_REJECTION_MESSAGE_RES.map(String).join(','))
+    ok(Object.isFrozen(BENIGN_REJECTION_MESSAGE_RES), '这个列表是冻结的')
+
+    /* 真实现场：mineflayer `stopDigging()` 抛的就是这一句，name 是普通 Error、没有任何标记 */
+    const aborted = new Error('Digging aborted')
+    ok(aborted.name === 'Error' && !aborted.mcTimeout && !aborted.mcAborted,
+      '（前提）它 name=Error、不带任何软标记 —— 旧判据认不出来', aborted.name)
+    await leak(aborted)
+    const st = rejectionGuardStats()
+    ok(got.length === 0, '宿主一条都没收到（不会闪退）', JSON.stringify(got))
+    ok(st.swallowed === 1 && st.lastFew.includes('dig-aborted'), '账上记成 dig-aborted', JSON.stringify(st.lastFew))
+    ok(Array.isArray(st.allowMsg) && st.allowMsg.length === 1, '统计里能看到这条按消息的判据', JSON.stringify(st.allowMsg))
+
+    /* 只认这一句：长得像但不是那句的，照样转交（不顺手吞掉一堆） */
+    await leak(new Error('Digging aborted: 但这句话后面还挂着别的东西'))
+    ok(got.length === 1, '长相接近但不是那一句 ⇒ 照样转交', JSON.stringify(got))
+    uninstallRejectionGuard()
+  })
+}
+
+section('⑨ issue #5：`bot.dig` 的返回 promise 一律"已处理"（不靠 race 兜）')
+{
+  await withCleanProcess(async () => {
+    const got = []
+    process.on('unhandledRejection', (r) => got.push(String(r?.message ?? '')))
+    const rejects = []
+    const bot = { dig: () => new Promise((_, rej) => { rejects.push(rej) }) }
+
+    ok(guardDigRejections(bot) === true, '挂上了')
+    ok(bot.__dshGuardedDigReject === true, '记了幂等标记')
+    ok(guardDigRejections(bot) === false, '重复调用不再包一层（否则每趟多一层闭包）')
+
+    const p1 = bot.dig()                    // 谁都不接（race 已经先赢的那种）
+    const p2 = bot.dig()                    // 调用方自己接
+    let caught = null
+    p2.catch((e) => { caught = e })
+    for (const rej of rejects) rej(new Error('Digging aborted'))
+    await new Promise((r) => setTimeout(r, 60))
+
+    ok(got.length === 0, '没人接的那条也不会变成 unhandledRejection（宿主不会 exit）', JSON.stringify(got))
+    ok(caught?.message === 'Digging aborted', '调用方自己 .catch 仍照常收到（不改返回值）', String(caught?.message))
+    void p1
+  })
+}
+
+section('⑩ 源码：三个挖掘入口开新挖前先自己松手 + 给 raw promise 挂 catch')
+{
+  const mv = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  const pl = readFileSync(new URL('../src/plugins.mjs', import.meta.url), 'utf8')
+  const cnt = (s, sub) => s.split(sub).length - 1
+  ok(cnt(pl, 'export function guardDigRejections') === 1, 'plugins 里有 guardDigRejections')
+  ok(cnt(pl, 'guardDigRejections(b, { log: (m) => self.log(m) })') === 1, 'setupPlugins 里真的调了它',
+    String(cnt(pl, 'guardDigRejections(b, { log: (m) => self.log(m) })')))
+  ok(cnt(mv, 'const pDig = b.dig(blk, true)') === 3, 'digOneGuarded / digOneSafe / stepUp 的 digAt 都拿到 raw promise',
+    String(cnt(mv, 'const pDig = b.dig(blk, true)')))
+  ok(cnt(mv, 'pDig?.catch?.(() => {})') === 3, '三个入口都给 raw promise 挂了空 catch',
+    String(cnt(mv, 'pDig?.catch?.(() => {})')))
+  ok(cnt(mv, 'if (b?.targetDigBlock) { try { b.stopDigging?.() } catch {} ; await sleep(0) }') === 3,
+    '开新挖前都先自己松手（把掐断放进我们的 try 里）',
+    String(cnt(mv, 'if (b?.targetDigBlock) { try { b.stopDigging?.() } catch {} ; await sleep(0) }')))
+  ok(!/Promise\.resolve\(b\.dig\(blk, true\)\)/.test(mv), '不再有"先 dig 再包 race、迟到拒绝没人接"的旧写法')
 }
 
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} 通过 / ${fail} 失败`)

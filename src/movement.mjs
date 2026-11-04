@@ -2690,8 +2690,16 @@ export async function digOneGuarded (b, blk, { digMs = MOVE_CARVE_DIG_MS } = {})
     const tool = typeof b.pathfinder?.bestHarvestTool === 'function' ? b.pathfinder.bestHarvestTool(blk) : null
     if (tool && typeof b.equip === 'function') await guarded(b.equip(tool, 'hand'))
     /* 🔵 探针：挖一格到底花了多久（"挖一格石头要一秒多"要能量出来）。MC_SLOW_DEBUG 才开，纯输出。 */
+    /* 🔴 2026-11-04 issue #5：mineflayer 的 `dig()` 内部会
+     *   `if (bot.targetDigBlock) bot.stopDigging()` —— 被取消那一次的 promise 以
+     *   `Error: Digging aborted` reject，而它早没人接了 ⇒ 宿主闪退。
+     *   这里我们自己先松手（并给一拍让状态落定），让"掐断"发生在**我们这条有 catch 的链上**；
+     *   再给 raw promise 单独挂一个空 catch（race 落定之后它才 reject 也不会没人接）。 */
+    if (b?.targetDigBlock) { try { b.stopDigging?.() } catch {} ; await sleep(0) }
     const tD = Date.now()
-    const okDig = await guarded(b.dig(blk, true)) === true
+    const pDig = b.dig(blk, true)
+    try { pDig?.catch?.(() => {}) } catch {}
+    const okDig = await guarded(pDig) === true
     if (process.env.MC_SLOW_DEBUG) {
       const ms = Date.now() - tD
       if (ms >= 500) { try { process.stderr.write(`[slow] dig 一格用了 ${ms}ms（${blk?.name ?? '?'}）\n`) } catch {} }
@@ -3670,8 +3678,13 @@ export async function stepUp (b, target, { allowDig = true, ctx = null, cells = 
       if (tool && typeof b.equip === 'function') {
         await Promise.race([Promise.resolve(b.equip(tool, 'hand')).catch(() => {}), sleep(digMs)])
       }
+      /* 同 `digOneGuarded`（issue #5）：先自己松手，再给 raw promise 挂空 catch ——
+       *   "新挖掘顶掉旧挖掘"抛的 `Digging aborted` 不许冒到进程级。 */
+      if (b?.targetDigBlock) { try { b.stopDigging?.() } catch {} ; await sleep(0) }
+      const pDig = b.dig(blk, true)
+      try { pDig?.catch?.(() => {}) } catch {}
       const r = await Promise.race([
-        Promise.resolve(b.dig(blk, true)).then(() => true, () => false),
+        Promise.resolve(pDig).then(() => true, () => false),
         sleep(digMs).then(() => TO),
       ])
       if (r === TO) { try { b.stopDigging?.() } catch {} ; return false }
@@ -4275,8 +4288,13 @@ async function digOneSafe (b, blk, ctx, digMs) {
     if (tool && typeof b.equip === 'function') {
       await Promise.race([Promise.resolve(b.equip(tool, 'hand')).catch(() => {}), sleep(digMs)])
     }
+    /* 同 `digOneGuarded`（issue #5）：先自己松手，再给 raw promise 挂空 catch ——
+     *   "新挖掘顶掉旧挖掘"抛的 `Digging aborted` 不许冒到进程级。 */
+    if (b?.targetDigBlock) { try { b.stopDigging?.() } catch {} ; await sleep(0) }
+    const pDig = b.dig(blk, true)
+    try { pDig?.catch?.(() => {}) } catch {}
     const r = await Promise.race([
-      Promise.resolve(b.dig(blk, true)).then(() => true, () => false),
+      Promise.resolve(pDig).then(() => true, () => false),
       sleep(digMs).then(() => TO),
     ])
     if (r === TO) { try { b.stopDigging?.() } catch {} ; return false }

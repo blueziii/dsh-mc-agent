@@ -385,6 +385,33 @@ export function guardPathfinderRejections (b, { log = null } = {}) {
   return true
 }
 
+/**
+ * 🔴 2026-11-04 GitHub issue #5：给 `bot.dig` 的返回 promise 挂一个空 catch
+ * （和 `guardPathfinderRejections` 同一套思路：**只标记"已处理"，不改返回值** ——
+ * 调用方自己 await / .catch 仍然照常收到 reject）。
+ *
+ * 为什么必须从这一层兜：mineflayer 的 `dig()` 是"新挖掘顶掉旧挖掘"，
+ * 被顶掉那次的 promise 会以 `Error: Digging aborted` reject（`digging.js:189`）。
+ * 而真正在等它的可能是 `Promise.race([dig, sleep(guardMs)])`（我们自己的守卫）、
+ * 也可能是 collectBlock 内部被撤掉的 co 生成器 —— **race 落定后那条迟到拒绝没人接**，
+ * 于是进程级 unhandledRejection ⇒ 宿主 fail-loud `exit(1)` ⇒ 整个 DSH 闪退。
+ */
+export function guardDigRejections (b, { log = null } = {}) {
+  if (!b || typeof b.dig !== 'function' || b.__dshGuardedDigReject) return false
+  const orig = b.dig.bind(b)
+  b.dig = function (block, ...rest) {
+    const p = orig(block, ...rest)
+    try {
+      p?.catch?.(() => {})
+    } catch (e) {
+      try { log?.(`给 dig 的拒绝挂 catch 失败：${e?.message ?? e}`) } catch {}
+    }
+    return p
+  }
+  b.__dshGuardedDigReject = true
+  return true
+}
+
 export async function setupPathfinder (self, { spec = null } = {}) {
   const b = self.bot
   if (!b) return false
@@ -1144,6 +1171,8 @@ export async function setupPlugins (self, { spec = null } = {}) {
    *     ② 执行时"我们刚按开的门"别被 vendor 的 useOne 再按回去（`guardDoorActivate`）。 */
   guardDoorActivate(b)
   guardDoorDig(b, { log: (m) => self.log(m) })
+  /* issue #5：bot.dig 的拒绝一律"已处理"，别让 `Digging aborted` 冒到进程级 */
+  guardDigRejections(b, { log: (m) => self.log(m) })
   const mv = self.pfReady ? movements(self) : null
 
   // ① 走过去挖方块 / 捡掉落物（内部自己用 mineflayer-tool 换工具）
