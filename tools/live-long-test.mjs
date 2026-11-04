@@ -67,7 +67,11 @@ const MC = new McBot({ ...CFG, instanceId: 'livelong', logFile: 'tmp-livelong.lo
  *   被踢之后 mineflayer 只会把 `bot.entity` 弄脏，上层看到的全是"机器人不在线"，特别能误导人。
  *   所以你下面所有命令都走 `say()`：**排队 + 间隔**（默认 120ms，`MC_CMD_GAP` 可调），并且在
  *   发现掉线后停止发送（不然一堆"发不出去"的命令只会把日志刷满）。 */
-const SAY_GAP = Number(process.env.MC_CMD_GAP ?? 120)
+/* 🔴 2026-11-04 补：节流默认**关**（0）。开着它会让命令比 `say()` 之后的 `await sleep(400)`
+ *   更晚才发出去，而砌场地的 `waitSolid` 是按"命令已经发完"来轮询的 ⇒ 场地半成品就开跑，
+ *   实测把 `cliff/tower` 跑成"掉下去 50 格"。只在被服务器判刷屏（`disconnect.spam`）时手动开：
+ *   `MC_CMD_GAP=300 node tools/live-long-test.mjs …` */
+const SAY_GAP = Number(process.env.MC_CMD_GAP ?? 0)
 let _sayQueue = Promise.resolve()
 let _lastSayAt = 0
 const say = (c) => {
@@ -652,6 +656,17 @@ async function main () {
     } catch (e) { console.log('thinkTimeout 设置失败:', e?.message ?? e) }
   }
   await setupPlayer()
+  /* 🔴 2026-11-04 实机抓到：场地在 `spawn + 300`，玩家离得远的区块服务器没加载，
+   *   第一处 `/fill` 直接被拒 —— `That position is not loaded`。于是首个用例的场地是空的，
+   *   bot 被 `/tp` 到半空后一路掉到地面（`dy=-50`、`walk-hung`），看着像"寻路坏了"。
+   *   修法：先算出 BASE（必须在 tp 之前算，tp 完 `baseOf()` 会算到新位置），把 bot 送过去站一会儿，
+   *   让区块加载完再开始跑用例。 */
+  {
+    const _b = baseOf()
+    say(`/tp ${NAME} ${_b.x + 0.5} ${_b.y + 2} ${_b.z + 0.5}`)
+    await sleep(1500)
+    console.log(`场地基座 ${_b.x},${_b.y},${_b.z}（已先 tp 过去加载区块）`)
+  }
   let round = 0
   /* 用户 2026-11-02：「总轮次两次就行，工具调用每个模式每项测试每轮 5 次」
    *   ⇒ 跑满 ROUNDS 轮就停（--rounds，默认 2），每项每轮 N_CALLS=5 次；--minutes 只当保险丝。 */
