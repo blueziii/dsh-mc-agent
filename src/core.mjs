@@ -188,7 +188,7 @@ export const DEFAULTS = {
   moveBudgetMs: CALL_BUDGET_MS,   // 2026-10-28 参数审计：原来 40_000（超单次上限 CALL_MS）⇒“忘了传 budget”的内部走路以为有 40 秒
   preferDoors: true, doorDigPenalty: 8,   // 优先走门/绕路：给"挖墙"加代价（2026-10-18）
   walkDigFirst: false, walkDigFirstCost: 0.4, walkClimbUp: true, walkCarveStep: true, walkOwnEscape: true,   // climbUp 留着自己用：A* 的 getMoveJumpUp 要求「斜上一格可挖出落脚面」，在纯空气竖井里它给不出边（实机：allowDig 一格都不往上爬）   // 脱困/跳台阶/往下都交回 A*（它已有 toBreak/JumpUp/DropDown）；true = 用我们自己那套（descend/climbUp/stepUp/breakAhead/clearHead）   // 两个默认关：往上爬交给 A* 的 getMoveJumpUp（挖的就是斜上两格+头顶），卡住时“挖眼前那格”交给 A* 的 toBreak（index.js 执行器挖前有校验）；true = 用我们自己的 climbUp / carveStepAhead
-  walkDigDetourMax: 2.5, walkDigSideTax: 2.5,   // 每挖一格额外按"多绕 N 步"记账 ⇒ 绕 ≤N 格不挖；SideTax = 横着挖多收 2 份、往下多收 5 份（2026-11-02 用户：只 allowDig 上地表会乱挖）
+  walkDigDetourMax: 16, walkDigSideTax: 2.5,   // 每挖一格额外按"多绕 N 步"记账 ⇒ 绕 ≤N 格不挖（2026-11-04 用户：绕超过 16 格就直接挖）；SideTax = 横着挖多收 2 份、往下多收 5 份（2026-11-02 用户：只 allowDig 上地表会乱挖）
   walkDigCost: null, walkTowerCost: null,   // null = 按地形档案（平地 12 / 沟 8…），显式给数值才覆盖
   walkLeafDigPenalty: 6,   // 2026-10-29：树叶不进禁挖名单，改成每格按 ×N 记账（塞进 mv.dshBreakPenalty；0 = 回到禁挖）
   /* 2026-10-23：耕地/土径不进 A* 的落脚点（防踩坏、防挖开挡路的）。代价：唯一通路时寻路报 NoPath 而不是硬穿。 */

@@ -1030,7 +1030,12 @@ const digFirstOn = digFirst === true
   /* 🔴 2026-10-27（用户：「nodig false 最短现在会挖家，ai 也没意识到要切换，设置个绕路最大
    *   限制大于 15 格在挖」）—— 光压 `digCost` 等于"挖一格 ≈ 走一步"，A* 会挖穿自家墙地板。
    *   每挖一格再记 `walkDigDetourMax`（默认 15）步 ⇒ 绕 15 格以内不挖，超过才挖。 */
-  if (digFirstOn) patchDigDetour(mv, { perBlock: Number(self.cfg?.walkDigDetourMax ?? 2.5) })
+  /* 🔴 2026-11-04 用户：「能不能绕路如果超过直接挖16格就直接挖」——
+   *   这条"每挖一格额外记 N 步"的绕路限额以前**只**在 digFirst（cfg.walkDigFirst:true）时挂，
+   *   而默认 digFirst 是关的，挖价走地形档案（0.45~1.2 ⇒ 挖一格 ≈ 走 1~2 步）⇒ 能挖就挖、
+   *   几乎没有绕路上限（房子/洞穴里的表现就是"乱挖"）。现在**只要允许挖就挂**：
+   *   门槛取 cfg.walkDigDetourMax（默认 16）⇒ 绕路 ≤16 格就绕，>16 格才挖。 */
+  if (digFirstOn || allowDig === true) patchDigDetour(mv, { perBlock: Number(self.cfg?.walkDigDetourMax ?? 16) })
   mv.scafoldingBlocks = scaffoldingItemIds(b)      // 背包里能垫的方块（**item id**，见该函数注释）
   /* 🔴 2026-10-30：搭桥收进 A* 之后，"垫一格"的额外代价（vendor `getMoveForward` 里读）。
    *    默认 5 ⇒ 走一格 1、垫一格 6+；平地绝不会铺，沟边才比"绕 5 格"划算。

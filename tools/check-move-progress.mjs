@@ -3037,16 +3037,17 @@ section('㉒ 岩浆：泡在里面时自己上浮 + 找岸，不许交给 A*')
 
 /* 🔴 2026-10-27（用户：「nodig false 最短现在会挖家，ai 也没意识到要切换，设置个绕路最大
  *   限制大于 15 格在挖」）—— `digFirst` 把 `digCost` 压到 0.4 之后 A* 走几何最短，
- *   直着挖穿自家墙和地板。现在每挖一格额外记 `walkDigDetourMax`（默认 15）步。 */
+ *   直着挖穿自家墙和地板。现在每挖一格额外记 `walkDigDetourMax`（默认 16）步。
+ *   2026-11-04 用户：「能不能绕路如果超过直接挖 16 格就直接挖」⇒ 这条限额**允许挖就挂**，不再只给 digFirst。 */
 {
   const plugSrc2 = read('../src/plugins.mjs')
   const coreSrc = read('../src/core.mjs')
   const movSrc = read('../src/movement.mjs')
   ok(/export function patchDigDetour \(mv, \{ perBlock = 15 \} = \{\}\)/.test(plugSrc2),
     '有"每挖一格多绕 N 步"的补丁（patchDigDetour）')
-  ok(/if \(digFirstOn\) patchDigDetour\(mv, \{ perBlock: Number\(self\.cfg\?\.walkDigDetourMax \?\? 2\.5\) \}\)/.test(plugSrc2),
-    'digFirst（cfg.walkDigFirst:true）时挂上它')
-  ok(/walkDigDetourMax: 2\.5/.test(coreSrc), '默认门槛 2.5 格（cfg.walkDigDetourMax 可调；跟着真实挖价缩）')
+  ok(/if \(digFirstOn \|\| allowDig === true\) patchDigDetour\(mv, \{ perBlock: Number\(self\.cfg\?\.walkDigDetourMax \?\? 16\) \}\)/.test(plugSrc2),
+    '① 只要允许挖就挂上它（不只 digFirst —— 2026-11-04 用户：绕超过 16 格就直接挖）')
+  ok(/walkDigDetourMax: 16/.test(coreSrc), '默认门槛 16 格（cfg.walkDigDetourMax 可调）')
   ok(/const canBreak = typeof mv\.safeToBreak === 'function' \? mv\.safeToBreak\(block\) : true[\s\S]{0,200}?if \(!canBreak\) return c/.test(plugSrc2),
     '🔴 能不能挖要问 safeToBreak，不能拿代价 >=100 猜（黑曜石本来就 100+，以前被当成挖不了）')
   ok(/if \(block\?\.safe\) return c/.test(plugSrc2),
