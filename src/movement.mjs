@@ -2229,6 +2229,11 @@ export const MOVE_CARVE_RESETS = 4      // 挖开挡路方块之后"阶梯清零
  *   现在只要**这一挖之后人真的往前挪了**（≥ MOVE_CARVE_MIN_ADVANCE）且预算还有余，就继续清零重走；
  *   次数上限仍然管"挖了没走"那种原地磨。 */
 export const MOVE_CARVE_MIN_ADVANCE = 0.5   // 挖开重走后至少挪了这么多格，才算"这次挖是有用的"
+/* 🔴 2026-11-04（全量回归抓到的副作用）：上面那条"接着挖"只对**同一高度**的目标成立 ——
+ *   它挖的是"往前走"，目标在头顶/脚下 9~12 格时继续横挖就是在白烧预算
+ *   （实测 `diag2s-up/dig+tower` 9.2、`diag2s-down/dig+tower` 10.6，都是挖了几十格高度没怎么变）。
+ *   ⇒ 目标与脚底的高差超过这个值就照旧按次数认输，把预算让给 climbUp/descend。 */
+export const MOVE_CARVE_SAME_Y = 2
 /* 🔴 2026-10-31 用户：「move 应该能直接移动到任意地方」——
  *   原来写死 6 格：从 y=40 挖阶梯上到地表（差 30 层、要挖 60 格）永远到不了，
  *   每次调用挖够 6 格就弃。真正的限制本来就是**时间**（10 秒能挖多少算多少），
@@ -5715,7 +5720,9 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
           const pCv = b.entity.position
           const advCv = carveAt ? Math.hypot(pCv.x - carveAt.x, pCv.z - carveAt.z) : Infinity
           const carveTimeOk = Date.now() - t0 < budget - MOVE_ESCALATE_MIN_MS
-          if (carveResets <= MOVE_CARVE_RESETS || (advCv >= MOVE_CARVE_MIN_ADVANCE && carveTimeOk)) {
+          /* 只对"目标跟自己差不多高"成立：高差大时要的是往上/往下，横着挖不解决问题（见 MOVE_CARVE_SAME_Y）。 */
+          const carveSameY = Math.abs(Number(target?.y) - Number(b?.entity?.position?.y)) <= MOVE_CARVE_SAME_Y
+          if (carveResets <= MOVE_CARVE_RESETS || (advCv >= MOVE_CARVE_MIN_ADVANCE && carveTimeOk && carveSameY)) {
             if (carveResets > MOVE_CARVE_RESETS) {
               self.log(`⛏ 挖开重走第 ${carveResets} 次 —— 但这次真往前挪了 ${advCv.toFixed(1)} 格，接着挖（不按次数认输）`)
             }

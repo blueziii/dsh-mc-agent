@@ -4081,10 +4081,12 @@ section('通审：计数、口径、开关、预算')
     ok(/export const MOVE_CARVE_MIN_ADVANCE = 0\.5/.test(mvT)
       && /let carveAt = null/.test(mvT)
       && /carveAt = \{ x: pCv\.x, z: pCv\.z \}/.test(mvT)
-      && /carveResets <= MOVE_CARVE_RESETS \|\| \(advCv >= MOVE_CARVE_MIN_ADVANCE && carveTimeOk\)/.test(mvT)
+      && /export const MOVE_CARVE_SAME_Y = 2/.test(mvT)
+      && /const carveSameY = Math\.abs\(Number\(target\?\.y\) - Number\(b\?\.entity\?\.position\?\.y\)\) <= MOVE_CARVE_SAME_Y/.test(mvT)
+      && /carveResets <= MOVE_CARVE_RESETS \|\| \(advCv >= MOVE_CARVE_MIN_ADVANCE && carveTimeOk && carveSameY\)/.test(mvT)
       && /const carveTimeOk = Date\.now\(\) - t0 < budget - MOVE_ESCALATE_MIN_MS/.test(mvT)
       && /还是没往前走（这次只挪了/.test(mvT),
-      '★ 挖开重走：次数上限之外，只要人真往前挪了（≥0.5 格）且预算还有余就继续挖（别 5 次就认输空转）')
+      '★ 挖开重走：次数上限之外，只要人真往前挪了（≥0.5 格）、预算还有余、且目标跟自己差不多高（≤2 格）就继续挖（别 5 次就认输空转；高差大时让给 climbUp/descend）')
     /* 🟢 用户 2026-11-04：`noStand` 把"目标格是实心（挖开就能站）"与"悬空（脚下没依附面、要垫）"
      *   说成同一句"是半空"，模型照着去垫柱。文案分开，判据看那格方块本身有没有碰撞箱。 */
     ok(/const tgtBlk0 = \(\(\) => \{ try \{ return b\.blockAt\(new Vec3\(gx0, gy0, gz0\)\) \} catch \{ return null \} \}\)\(\)/.test(mvT)
