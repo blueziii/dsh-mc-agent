@@ -1032,10 +1032,8 @@ repIn(join(PF_DIR, 'lib', 'goto.js'),
         cleanup(error('Timeout', 'Took to long to decide path to goal!'))
       } else if (results.path.length === 0) {`,
   `      } else if (results.status === 'timeout') {
-        /* DSH-PATCH 2026-11-03：A* 把 thinkTimeout 算满时报 timeout，但 bestNode 的半截路
-         * 是能走的。原来一律 reject('Timeout') ⇒ DSH 重开 goto（setGoal → resetPath 清 path），
-         * 又从零再算 3.5 秒，人停在那儿不动 —— 用户看到的「水平挖 5 格就卡一小段」。
-         * 只有连一格半截路都没有时才报错。 */
+        /* DSH-PATCH 2026-11-03：算满 thinkTimeout 时半截路还能走，原来一律 reject ⇒
+         * 重开 goto 从零再算、人停着不动。只有连一格都没有才报错。 */
         if (!results.path || results.path.length === 0) {
           cleanup(error('Timeout', 'Took to long to decide path to goal!'))
         }
