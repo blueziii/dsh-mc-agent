@@ -790,7 +790,9 @@ repIn(
  *   · 只有 `mv.allowBridge`（来自 mc_move{allowBridge:true}）打开才生成；
  *   · 代价 + bridgeCost（默认 5）⇒ 平地绝不选（走一格 1、垫一格 5+），沟边才比"绕 5 格"划算；
  *   · `remainingBlocks === 0`（背包没垫脚料）时照旧不生成 —— `mv.scafoldingBlocks` 由
- *     `src/plugins.mjs` 按背包实况设置，所以"没方块"在规划阶段就知道，不会规划出一条铺不出来的路。 */
+ *     `src/plugins.mjs` 按背包实况设置，所以"没方块"在规划阶段就知道，不会规划出一条铺不出来的路。
+ * 2026-11-04：实机 vendor 树上这条闸门曾被后来的补丁挤掉（`check-mc-pathfinder` 报「remainingBlocks=0 仍生成边」
+ *   与「搭桥边带 2 个 toPlace」），已手工修复：闸门补回、错插进来的 getMoveJumpUp 垫柱段删除。 */
 repIn(
   join(PF_DIR, 'lib', 'movements.js'),
   [
