@@ -4050,11 +4050,15 @@ section('通审：计数、口径、开关、预算')
     ok(!/\.thinkTimeout\s*=/.test(mvT),
       '★ 移动层不许自己改 pathfinder.thinkTimeout（实测压到 1.2 秒 A* 算不完垫柱边，人反而一格不动）')
     /* ⑦ 用户 2026-11-02：「move 一次一共就 10s，有必要给那么多范围吗」——
-     *    searchRadius 是"代价预算"，给太大就等于允许 A* 绕几十步，实心岩体里会扩散到超时。 */
+     *    searchRadius 是"代价预算"，给太大就等于允许 A* 绕几十步，实心岩体里会扩散到超时。
+     *    🔴 2026-11-04 修正：当时按「10 秒 ⇒ 260 分」封顶，可实心岩里挖一步实测 c82~c100 ⇒
+     *    260 分只够 2.6 步，目标十几步 ⇒ 每趟都被剪成 noPath（diag2s-up/dig+tower 48 秒 / 5 趟
+     *    只挪到对角 10.6）。现在按「一步真实代价 × 每秒两步 × 剩余秒数」算，上限 1200；
+     *    仍然不许按目标距离（dS）无上限放大。 */
     ok(/const capByTime = Number\.isFinite\(leftSearchMs\)/.test(mvT)
-      && /Math\.max\(120, Math\.min\(260, Math\.round\(leftSearchMs \/ 1000 \* 26\)\)\)/.test(mvT)
-      && !/Math\.min\(900, Math\.ceil\(dS\) \* digUnit \+ 20\)/.test(mvT),
-      '★ searchRadius 按剩余时间封顶（10 秒 ⇒ ≤260 分），不许再按目标距离无上限放大')
+      && /Math\.min\(1200, Math\.round\(leftSearchMs \/ 1000 \* stepCost \* stepPerSec\)\)/.test(mvT)
+      && !/Math\.min\(260, Math\.round\(leftSearchMs \/ 1000 \* 26\)\)/.test(mvT),
+      '★ searchRadius 按剩余时间封顶（≤1200 分，按一步真实挖价折算），不许再按目标距离无上限放大')
     /* 🟢 跨调用记忆：同一目标连叫 5 次时，上一趟已证明"没地面/液体/受保护"的方向排到最后，
      *   别再每趟重试（实测 diag2s-up/dig+tower 47024ms → 41210ms）。只记方向、最多 8 个、爬上去就清空。 */
     ok(/b\?\.__mcDeadDirsFor === memoKey && b\.__mcDeadDirs instanceof Set/.test(mvT)
@@ -4102,6 +4106,17 @@ section('通审：计数、口径、开关、预算')
       && /if \(Number\(info\?\.moved\) > 0\.3\) break/.test(mvT)
       && /retriedElsewhereTries: elsewhereTries/.test(mvT),
       '★ goal-reached-elsewhere 最多补 3 次（不再 0.12 秒秒回），补到真走起来为止')
+    /* 🟢 2026-11-04 用户：「收掉 diag2s-up/dig+tower」—— 实机定位到 A* 的 searchRadius 其实是
+     *   「起点启发值 + 代价预算」（vendor astar.js:51 maxCost = h + searchRadius），我们只给 260 分，
+     *   而实心岩里挖一步实测 c82~c100 ⇒ 预算只够 2.6 步 ⇒ 每趟都被剪成 noPath，全靠脱困阶梯一格一格凿
+     *   （diag2s-up/dig+tower 48 秒 / 5 趟只挪到对角 10.6）。现在按「一步真实代价 × 每秒两步 × 剩余秒数」
+     *   算预算、上限 1200；超时给半截路也能走（vendor goto.js 只在没有 path 时报 timeout）。 */
+    ok(/const stepCost = Math\.round\(digUnit \* 2\.6\)/.test(mvT)
+      && /const stepPerSec = 2/.test(mvT)
+      && /Math\.min\(1200, Math\.round\(leftSearchMs \/ 1000 \* stepCost \* stepPerSec\)\)/.test(mvT)
+      && /Math\.ceil\(dS\) \* stepCost \+ 20/.test(mvT)
+      && !/Math\.min\(260, Math\.round\(leftSearchMs \/ 1000 \* 26\)\)/.test(mvT),
+      '★ A* 搜索预算是「代价」不是「格数」：按一步真实挖价（digUnit×2.6）× 每秒两步算，上限 1200（260 分只够 2.6 步 ⇒ 每趟 noPath）')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

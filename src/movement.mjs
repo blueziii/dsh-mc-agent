@@ -5861,6 +5861,14 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
          *   ⇒ 全程 `NoPath`，`diag2-up/dig+tower` 对角只走了 1.4 格。
          *   预算按挖价缩放：挖价 0.6 时 `digUnit = 20`，与原来**完全一样**。 */
         const digUnit = Math.max(20, Math.ceil((Number(mv?.digCost) || 0.6) * 8 + 12))
+        /* 🔴 2026-11-04 实机（diag2s-up/dig+tower 一整轮 48 秒只走 10.6 对角、5 次全 budget）：
+         *   预算按"分/秒 × 秒"给，但**每秒给多少分**没跟挖价走 —— 实心岩里一步 `dig+tower`
+         *   实测 `brk3 c100`（挖三格），10 秒只够 2.6 步，而目标要 13 步 ⇒ A* 每趟都
+         *   被 `maxCost` 剪成 `noPath`，全靠脱困阶梯一格一格凿（日志里每秒一条
+         *   「🚧 A* 说没路 → 挖开挡路那格」）。现在每秒按"一步实挖代价 × 2 步"给：
+         *   0.6 档 ≈ 104 分/秒，tower 档（digCost 3）≈ 188 分/秒。 */
+        const stepCost = Math.round(digUnit * 2.6)   // 0.6 档 ≈52，tower 档 ≈94（实机 c82~c100）
+        const stepPerSec = 2
         /* 🔴 2026-11-02 用户：「move 一次一共就 10s，有必要给那么多范围吗」——没有。
          *   10 秒里挖着走最多推进十几格（一格实挖 0.4~1.5 秒），预算给到 600+ 分
          *   等于允许 A* 绕 70 步，它就会在实心岩体里把半径几十格的空间全展开 ⇒ 撞 thinkTimeout
@@ -5869,9 +5877,9 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
          *   宁可让它"早一点承认搜不到"，立刻落到脱困阶梯/两段式上去，也别把预算烧在搜索里。 */
         const leftSearchMs = (() => { try { return Number(self?.callLeft?.()) } catch { return Number.NaN } })()
         const capByTime = Number.isFinite(leftSearchMs)
-          ? Math.max(120, Math.min(260, Math.round(leftSearchMs / 1000 * 26)))
-          : 260
-        const rS = Math.max(32, Math.min(capByTime, Math.ceil(dS) * digUnit + 20))
+          ? Math.max(120, Math.min(1200, Math.round(leftSearchMs / 1000 * stepCost * stepPerSec)))
+          : 1200
+        const rS = Math.max(32, Math.min(capByTime, Math.ceil(dS) * stepCost + 20))
         if (b.pathfinder) b.pathfinder.searchRadius = rS
         if (mv) mv.searchRadius = rS
       } catch { /* 假 bot / 没有 pathfinder */ }
