@@ -4072,6 +4072,34 @@ section('通审：计数、口径、开关、预算')
       && /riseMode !== 'dig' && headClearNoRise < 2/.test(mvT)
       && /fyNow > headClearLastY\) headClearNoRise = 0/.test(mvT),
       '★ 清头顶循环有上限：连着 2 次没升上去就停手并强制换挖台阶（别一直挖头顶 2 格）')
+    /* 🟢 用户 2026-11-04 实机（`tunnel/dig` 25 秒只推进 18 格，判据要 ≥19）：
+     *   实心岩里 A* 每趟顶满 thinkTimeout 才回来报 NoPath，`breakAhead`（挖开重走）每轮真凿开 2 格、
+     *   人真往前挪 2 格，但 `MOVE_CARVE_RESETS = 4` 只按**次数**认输 ⇒ 第 5 次就"按认输处理"，
+     *   之后 descend/jump/backoff 空转，1 步/秒。
+     *   现在：次数上限之外，只要这一挖之后人真的往前挪了（≥ MOVE_CARVE_MIN_ADVANCE）且预算还有余，
+     *   就继续清零重走；"挖了没走"仍然按次数认输。 */
+    ok(/export const MOVE_CARVE_MIN_ADVANCE = 0\.5/.test(mvT)
+      && /let carveAt = null/.test(mvT)
+      && /carveAt = \{ x: pCv\.x, z: pCv\.z \}/.test(mvT)
+      && /carveResets <= MOVE_CARVE_RESETS \|\| \(advCv >= MOVE_CARVE_MIN_ADVANCE && carveTimeOk\)/.test(mvT)
+      && /const carveTimeOk = Date\.now\(\) - t0 < budget - MOVE_ESCALATE_MIN_MS/.test(mvT)
+      && /还是没往前走（这次只挪了/.test(mvT),
+      '★ 挖开重走：次数上限之外，只要人真往前挪了（≥0.5 格）且预算还有余就继续挖（别 5 次就认输空转）')
+    /* 🟢 用户 2026-11-04：`noStand` 把"目标格是实心（挖开就能站）"与"悬空（脚下没依附面、要垫）"
+     *   说成同一句"是半空"，模型照着去垫柱。文案分开，判据看那格方块本身有没有碰撞箱。 */
+    ok(/const tgtBlk0 = \(\(\) => \{ try \{ return b\.blockAt\(new Vec3\(gx0, gy0, gz0\)\) \} catch \{ return null \} \}\)\(\)/.test(mvT)
+      && /const tgtSolid = Boolean\(tgtBlk0 && tgtBlk0\.boundingBox === 'block'\)/.test(mvT)
+      && (mvT.match(/是实心 \$\{tgtName\}（不是半空）/g) || []).length >= 2
+      && /self\.log\(tgtSolid/.test(mvT),
+      '★ "半空"与"实心"两种 target 文案分开（实心 ⇒ 挖开就能站，别引模型去垫柱）')
+    /* 🟢 用户 2026-11-04：`goal-reached-elsewhere`（别人的到点事件把这一趟 resolve）以前只补 1 次，
+     *   撞上第二次就直接 0.12 秒收工。现在最多补 MOVE_ELSEWHERE_RETRIES 次，补到真的走起来为止。 */
+    ok(/export const MOVE_ELSEWHERE_RETRIES = 3/.test(mvT)
+      && /while \(!info\.arrived && info\.reason === 'goal-reached-elsewhere'/.test(mvT)
+      && /elsewhereTries < MOVE_ELSEWHERE_RETRIES && self\.msLeft\(\) > 1_200\)/.test(mvT)
+      && /if \(Number\(info\?\.moved\) > 0\.3\) break/.test(mvT)
+      && /retriedElsewhereTries: elsewhereTries/.test(mvT),
+      '★ goal-reached-elsewhere 最多补 3 次（不再 0.12 秒秒回），补到真走起来为止')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

@@ -922,10 +922,20 @@ async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.
    *    resolve ⇒ 本次调用 45~85ms 就返回 goal-reached-elsewhere，人一步没动。以前只能让 AI 再手动叫
    *    一次；这里自己重试一次（**还剩 1.2 秒以上预算**才重试，不抢下一轮的时间）。只重试这一个 reason ——
    *    NoPath / stuck / call-over 重试是同参数撞墙，没意义。 */
-  if (!info.arrived && info.reason === 'goal-reached-elsewhere' && self.msLeft() > 1_200) {
+  let elsewhereTries = 0
+  while (!info.arrived && info.reason === 'goal-reached-elsewhere'
+    && elsewhereTries < MOVE_ELSEWHERE_RETRIES && self.msLeft() > 1_200) {
+    elsewhereTries++
     try { ctx.stopPathing?.(self.requireBot()) } catch {}
     const retried = await walkToOnce(self, target, { arrive, budget, noTower, noBridge, intent, waterRecover, allowDig, xz }, ctx)
-    info = { ...retried, retriedElsewhere: true }
+    info = { ...retried, retriedElsewhere: true, retriedElsewhereTries: elsewhereTries }
+    /* 重试真走起来了就够（说明这次跑的是自己的路），别再补 —— 补多了只是替别人的事件烧预算。 */
+    if (Number(info?.moved) > 0.3) break
+  }
+  if (elsewhereTries > 1) {
+    self.log(info?.arrived
+      ? `↩️ 别人的"到点"事件把这一趟打断了 ${elsewhereTries - 1} 次，已重试到位`
+      : `↩️ 连补 ${elsewhereTries} 次都被别人的"到点"事件打断 —— 这一趟先收工，再叫一次`)
   }
   /* 🔴 2026-10-23（P0-b，用户 m00634）：以前 `arrived:false` 只说"还差 N 格"（直线）——
    *    AI 看不出"这条路还有 180 格、要叫四次"，于是每次都当最后一趟在等，走两趟没到就换目标。
@@ -2213,6 +2223,12 @@ export function aboveOf (b) {
 export const MOVE_CARVE_CELLS = 2       // 一次最多往前看几格
 export const MOVE_CARVE_TRIES = 2       // 一次 walkPathfinder 里最多补挖几次
 export const MOVE_CARVE_RESETS = 4      // 挖开挡路方块之后"阶梯清零重走"最多几次（防挖了又挖不认输）
+/* 🔴 2026-11-04（用户实机 tunnel/dig：25 秒只推进 18 格）：上面那个 4 次上限**只按次数记**，
+ *   不管这一挖有没有把人往前送。实心岩里每轮 breakAhead 都真凿开 2 格、人真往前挪 2 格，
+ *   照样第 5 次就"按认输处理" ⇒ 之后 descend/jump/backoff 空转，1 步/秒。
+ *   现在只要**这一挖之后人真的往前挪了**（≥ MOVE_CARVE_MIN_ADVANCE）且预算还有余，就继续清零重走；
+ *   次数上限仍然管"挖了没走"那种原地磨。 */
+export const MOVE_CARVE_MIN_ADVANCE = 0.5   // 挖开重走后至少挪了这么多格，才算"这次挖是有用的"
 /* 🔴 2026-10-31 用户：「move 应该能直接移动到任意地方」——
  *   原来写死 6 格：从 y=40 挖阶梯上到地表（差 30 层、要挖 60 格）永远到不了，
  *   每次调用挖够 6 格就弃。真正的限制本来就是**时间**（10 秒能挖多少算多少），
@@ -2278,6 +2294,11 @@ export const MOVE_DETOUR_R = 3          // 侧向绕行偏离直线几格
 export const MOVE_DETOUR_MS = 1_600     // 单次绕行最多走多久
 /* 脱困阶梯的预算余量：剩这么点时间就别再升一级了（一级最坏要 3.5 秒 vendor stuck + 动作）。 */
 export const MOVE_ESCALATE_MIN_MS = 600
+/* 🔴 2026-11-04（实机 tunnel/dig：两次 noPath 之后每次调用 0.12 秒就报"到别处了"）：
+ *   vendor 的 goal_reached 是**全局**事件，别的寻路到点会把这一趟一起 resolve。
+ *   以前只补一次重试，撞上"又是别人的事件"就直接收工。现在最多补 MOVE_ELSEWHERE_RETRIES 次
+ *   （预算够才补），每补一次都要真的走起来才算数。 */
+export const MOVE_ELSEWHERE_RETRIES = 3
 /* ── 2026-10-30 用户：「move 中加实体避让」 ──────────────────────────────────────
  *    vendor 只在**规划那一刻**看实体（`mv.entityCost = 8` 已设，A* 会主动绕开），
  *    路径定下来之后实体再走过来，执行层原本完全不管 —— 人就顶着怪/顶着牛走，
@@ -4847,20 +4868,29 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
   let padDone = false
   if (!xz && sp?.noStand === true && ctx?._padDone !== true) {
     const gx0 = Math.floor(Number(sp.x)); const gy0 = Math.floor(Number(sp.y)); const gz0 = Math.floor(Number(sp.z))
+    /* 🔴 2026-11-04：noStand 只说"这一格站不住"，**实心**（挖开就能站）与**悬空**（脚下没依附面、
+     *   要垫）完全是两回事，以前一句话糊过去 ⇒ 模型照着"半空"去垫柱。这里先看清那格是什么。 */
+    const tgtBlk0 = (() => { try { return b.blockAt(new Vec3(gx0, gy0, gz0)) } catch { return null } })()
+    const tgtSolid = Boolean(tgtBlk0 && tgtBlk0.boundingBox === 'block')
+    const tgtName = tgtBlk0?.name ?? '方块'
     const baseY = standableY(b, gx0, gy0, gz0)
     if (noTower) {
       /* 没开 allowTower：垫不上去。保持老行为（交给 A*），但日志里说清是“半空、不是没路”。
        * 🔴 2026-11-02 用户（dig 档实机）：「一直在挖旁边的方块，头顶那个又没挖」——
        *   原文案写成「没开 allowTower，垫不上去」，读起来像"这趟没救了"，
        *   而 dig 档本来就不垫、靠挖上去 ⇒ 改成说清"继续挖"。 */
-      self.log(`⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空、脚下没依附面 —— 这趟不垫柱（allowTower 关着），继续挖着往上`)
+      self.log(tgtSolid
+        ? `⚠️ 目标 (${gx0},${gy0},${gz0}) 是实心 ${tgtName}（不是半空）—— 这趟不垫柱（allowTower 关着），把那格挖开就能站`
+        : `⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空、脚下没依附面 —— 这趟不垫柱（allowTower 关着），继续挖着往上`)
     } else if (Number.isFinite(baseY) && baseY < gy0 && canStandAtWorld(b, gx0, baseY, gz0)) {
       padBase = { x: gx0, y: baseY, z: gz0 }
       padGoalObj = { x: gx0, y: gy0, z: gz0 }
       sp = { ...sp, x: gx0, y: baseY, z: gz0, adjusted: true, noStand: false, padUp: true }
       self.log(`🧱 目标是半空 (${gx0},${gy0},${gz0}) —— 先到正下方底座 (${gx0},${baseY},${gz0})，到位后再垫 ${gy0 - baseY} 格`)
     } else {
-      self.log(`⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空，那一列下面也没找到落脚点 —— 垫不过去`)
+      self.log(tgtSolid
+        ? `⚠️ 目标 (${gx0},${gy0},${gz0}) 是实心 ${tgtName}（不是半空）—— 但那一列下面没找到落脚点，先把那格挖开再走`
+        : `⚠️ 目标 (${gx0},${gy0},${gz0}) 是半空，那一列下面也没找到落脚点 —— 垫不过去`)
     }
   }
   const ty = sp.y
@@ -5524,6 +5554,7 @@ const switchRiseMode = (why, force = false) => {
       } catch {}
     }
     let carveResets = 0   // 挖开挡路方块后"阶梯清零重走"的次数（上限 MOVE_CARVE_RESETS）
+    let carveAt = null    // 上次"挖开重走"时人的位置（判断这一挖有没有真把人往前送）
     /* 2026-10-27：vendor 中途重置路径后的自动重发计数（见 `MOVE_AUTOREPATH_MAX`）。
      * `autoRepathDLeft` 记上次重发时离目标还有多远 —— 只重发不靠近就是在空转。 */
     let autoRepath = 0
@@ -5680,8 +5711,19 @@ let kickDLeft = null   // 上次续跑时的水平剩余距离（续跑必须换
         if (step === 'breakAhead' && Number(em?.dug) > 0) {
           carved += Number(em.dug)
           carveResets++
-          if (carveResets <= MOVE_CARVE_RESETS) attempt = 0
-          else self.log(`⛏ 已经"挖开重走" ${carveResets} 次还是走不动 —— 不再清零阶梯，按认输处理`)
+          /* 🔴 2026-11-04：次数上限之外再给"这一挖真把人往前送了"一条活路（见 MOVE_CARVE_MIN_ADVANCE）。 */
+          const pCv = b.entity.position
+          const advCv = carveAt ? Math.hypot(pCv.x - carveAt.x, pCv.z - carveAt.z) : Infinity
+          const carveTimeOk = Date.now() - t0 < budget - MOVE_ESCALATE_MIN_MS
+          if (carveResets <= MOVE_CARVE_RESETS || (advCv >= MOVE_CARVE_MIN_ADVANCE && carveTimeOk)) {
+            if (carveResets > MOVE_CARVE_RESETS) {
+              self.log(`⛏ 挖开重走第 ${carveResets} 次 —— 但这次真往前挪了 ${advCv.toFixed(1)} 格，接着挖（不按次数认输）`)
+            }
+            attempt = 0
+            carveAt = { x: pCv.x, z: pCv.z }
+          } else {
+            self.log(`⛏ 已经"挖开重走" ${carveResets} 次还是没往前走（这次只挪了 ${Number.isFinite(advCv) ? advCv.toFixed(1) : '0'} 格）—— 不再清零阶梯，按认输处理`)
+          }
           self.log(`⛏ 脱困时挖开了 ${em.dug} 格挡路方块 —— 重算再走`)
           /* 🔴 2026-10-27：挖一格 ≠ 挖通（要 2 格高）。另一半挖不动就把话说全。 */
           if (em?.halfOpen) {
