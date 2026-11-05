@@ -201,7 +201,15 @@ section('⑦ 悬停（用户选「要悬停，走路时自动落地」）')
   ok(solidUnder({ blockAt: () => ({ name: 'stone' }) }, new Vec3(0, 64, 0)) === true, 'solidUnder：脚下石头 ⇒ true')
   ok(solidUnder({ blockAt: () => ({ name: 'air' }) }, new Vec3(0, 64, 0)) === false, 'solidUnder：空气 ⇒ false')
   ok(solidUnder({ blockAt: () => null }, new Vec3(0, 64, 0)) === false, 'solidUnder：读不到（没加载）⇒ false，宁可悬着别掉')
+}/* 🔴 2026-11-05 issue #6 ⑥："创造模式 fly 也是 0 格"。客户端改 velocity 是本地位移，服务端不认就发
+ *    position 包把我们拽回去（mineflayer 抛 forcedMove）；以前只报"飞不动了"，分不清是撞地形还是没权限。 */
+{
+  const src = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  ok(/let forcedMoves = 0/.test(src) && /b\.on\?\.\('forcedMove', onForced\)/.test(src), '飞的时候数服务端把我们拽回去几次（forcedMove）')
+  ok(/try \{ b\.removeListener\?\.\('forcedMove', onForced\) \} catch/.test(src), '收尾一定摘掉监听（别在断了的连接上留钩子）')
+  ok(/serverMoved: forcedMoves/.test(src) && /stallWhy/.test(src), '结果里给出 serverMoved + stallWhy：被拽回去过就说是权限/区域问题，没拽过才说撞地形')
 }
+
 
 console.log(`\n通过 ${pass} · 失败 ${fail}`)
 process.exit(fail ? 1 : 0)

@@ -1348,6 +1348,14 @@ export async function flyTo (self, x, y, z, { budget = CALL_BUDGET_MS } = {}, ct
   let hovering = false                     // 收尾后是不是留在空中悬停（见 finally）
   let last = b.entity.position.clone()
   let lastProgress = Date.now()
+  /* 🔴 2026-11-05 issue #6 ⑥（“创造模式 fly 也是 0 格”）：客户端改 `entity.velocity` 是**本地**位移，
+   *    服务端不认就直接发 position 包把我们拽回去（mineflayer 抛 `forcedMove`）。
+   *    以前这种情况只报一句“飞不动了”，看不出到底是被地形挡、还是服务端不认飞行；
+   *    这里数一下拽回次数，收尾时如实说出来。 */
+  let forcedMoves = 0
+  const onForced = () => { forcedMoves++ }
+  let stalledAt = 0
+  try { b.on?.('forcedMove', onForced) } catch { /* 老版本没有这个事件就算了 */ }
   self._selfMovingAt = Date.now()          // 别把自己飞当成"被传送"
   try {
     setFlyingAbilities(b, true)            // 🔴 先告诉服务端我在飞，否则位移会被打回（见上面 A）
@@ -1368,6 +1376,7 @@ export async function flyTo (self, x, y, z, { budget = CALL_BUDGET_MS } = {}, ct
         last = b.entity.position.clone()
         lastProgress = Date.now()
       } else if (Date.now() - lastProgress > 2500) {
+        stalledAt = Date.now()              // 推不动了：是地形挡的还是服务端拽回来的，收尾时按 forcedMoves 判
         break                               // 推不动了（被地形挡住 / 服务端不接受），别耗满预算
       }
     }
@@ -1392,6 +1401,7 @@ export async function flyTo (self, x, y, z, { budget = CALL_BUDGET_MS } = {}, ct
       if (flying) { try { b.creative.stopFlying() } catch { /* 忽略 */ } }
       b._hoverFlying = false
     }
+    try { b.removeListener?.('forcedMove', onForced) } catch { /* 忽略 */ }
     self._selfMovingAt = Date.now()
   }
   const p = b.entity.position
@@ -1403,6 +1413,15 @@ export async function flyTo (self, x, y, z, { budget = CALL_BUDGET_MS } = {}, ct
     position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
     distance, arrived, ms: Date.now() - t0,
     ...(hovering ? { hovering: true, hint: '脚下没实物，我**悬在空中**没落地（原版飞行手感）—— 想落地或走路就 mc_move{mode:"walk"}（会自动关飞行），继续飞就再叫一次 fly。' } : {}),
+    ...(stalledAt
+      ? {
+          stalled: true,
+          serverMoved: forcedMoves,
+          ...(forcedMoves > 0
+            ? { stallWhy: `服务端把我拽回来了 ${forcedMoves} 次（它不认这个位置的飞行）—— 要么那片区域不给飞，要么服务端没给 allowFlying；改用 mode:"walk" 走，或者用 mc_command 的 /tp 让你自己飞过去` }
+            : { stallWhy: '2.5 秒一步都没动、服务端也没拽我 —— 多半是**撞在地形里**（头顶/脚前是实心方块）：先 mc_dig 挖开，或者把 y 抬高十几格再飞' }),
+        }
+      : {}),
     ...(preempted ? { reason: 'preempted', hint: '另一次移动把我接管了（我停了飞行）—— 再叫一次 mc_move{mode:"fly"} 往同一个点飞' } : {}),
     ...(arrived ? {} : {
       note: `没到目标（还差 ${distance} 格）。`
@@ -3425,6 +3444,12 @@ export function lavaAheadOf (b, target, { cells = 3 } = {}) {
  *    几何里重复同一种失败（跳不上去还是跳不上去），白吃掉一两秒预算，还把脱困阶梯往后拖。
  *    试一次不行就把控制权交给阶梯（换招比重复同一个动作有用）。 */
 export const STEP_UP_TRIES = 1
+/** 🔴 2026-11-04 实机（柱林里一秒 14 次起跳、18:11:37 净下落 3.8 格摔到 9/20 血）：
+ *    `stepUp` 的定位是"走不动时的最后一脚"，可它只判"前面是不是高一格"，不判"落得住吗"。
+ *    柱状地形里"高一格"永远成立 ⇒ 变成每步都跳；落点下面是空气就自由落体。
+ *    两条闸门：①跳前验落点（目标格能站才跳）；②同一格 8 秒内连跳 2 次没净升高就放弃这一招。 */
+export const MOVE_STEP_UP_REPEAT_MAX = 2
+export const MOVE_STEP_UP_REPEAT_MS = 8000
 /* 往下走的预算（用户 2026-10-29：「按时间」）。
  * 不再钉“一趟最多 3 次”—— 目标低 13 格时只能下 3 层，得叫四五次工具。
  * 现在按**剩余时间**算：每下一层约 1～2 秒（B 挖一格 + 落下 / A 挖两格 + 走），
@@ -3688,6 +3713,49 @@ export async function stepUp (b, target, { allowDig = true, ctx = null, cells = 
   if (!start) return { tried: false, why: 'no-bot' }
   const x0 = Number(start.x), y0 = Number(start.y), z0 = Number(start.z)
   let dug = 0
+  /* 🔴 2026-11-04 用户实机（柱林）：一秒 14 次起跳 + `🦘 落脚：得往下 1~2 格才有落脚` +
+   *    `mc_auto：掉血 + 净下落 3.8 格 ⇒ 判成摔伤 … 血 9/20`。
+   *    走到这一行之前只判过"前面是不是高一格 / 头顶能不能清"，**从不判落点能不能站**；
+   *    柱状地形里"高一格"永远成立 ⇒ 每步都跳，落点下面是空气就自由落体。
+   *    这里统一验一次：脚位空 + 头顶空 + 脚下实心且不是液体。
+   *    例外：①自己那一列（垫柱档 `stepUp(pf.y+1)` 是"跳起来把方块垫脚下"）不验；
+   *          ②`canStandOnTop === false`（两张方块厚的台阶，马上要挖掉脚位那格）不验。 */
+  const landX = Number(geo.x), landY = Number(geo.standY), landZ = Number(geo.z)
+  const ownColumn = Math.floor(x0) === landX && Math.floor(z0) === landZ
+  const hopKey = `${landX},${landY},${landZ}`
+  const hopNow = Date.now()
+  let hopFails = 0
+  try {
+    if (b.__mcHopKey === hopKey && hopNow - Number(b.__mcHopAt ?? 0) < MOVE_STEP_UP_REPEAT_MS) hopFails = Number(b.__mcHopFails ?? 0)
+  } catch { hopFails = 0 }
+  const noteHop = (okNow) => {
+    try {
+      if (okNow) { b.__mcHopKey = null; b.__mcHopFails = 0; b.__mcHopAt = 0 } else {
+        b.__mcHopKey = hopKey
+        b.__mcHopFails = hopFails + 1
+        b.__mcHopAt = Date.now()
+      }
+    } catch { /* 假 bot 没有这些字段 */ }
+  }
+  if (!ownColumn && geo.canStandOnTop !== false) {
+    let landOk = false
+    let landedOn = null
+    try {
+      const feetL = b.blockAt(new Vec3(landX, landY, landZ))
+      const headL = b.blockAt(new Vec3(landX, landY + 1, landZ))
+      const underL = b.blockAt(new Vec3(landX, landY - 1, landZ))
+      landedOn = underL?.name ?? null
+      landOk = feetL?.boundingBox !== 'block' && headL?.boundingBox !== 'block' &&
+        Boolean(underL) && underL.boundingBox === 'block' && !isLiquid(underL.name)
+    } catch { landOk = false }
+    if (!landOk) {
+      noteHop(false)
+      return { tried: true, ok: false, why: 'no-land', landing: { x: landX, y: landY, z: landZ }, landedOn }
+    }
+  }
+  if (hopFails >= MOVE_STEP_UP_REPEAT_MAX) {
+    return { tried: true, ok: false, why: 'hop-repeat', repeat: hopFails, landing: { x: landX, y: landY, z: landZ } }
+  }
   /* 挖一格：换最合适的工具 → 挖 → 超时就停手。原来这段是内联在"清头顶"里的，
    * 「两张方块厚的台阶」也要用同一套（换工具/超时/沙砾没挖穿都算失败），抽出来。
    * 挖之前先停 pathfinder：vendor 每个 physicsTick 都会把控制位按回去。 */
@@ -3796,6 +3864,7 @@ export async function stepUp (b, target, { allowDig = true, ctx = null, cells = 
   /* 只认“真的抬高了将近一格”。以前还要求 moved >= 0.25，可是窄井里横向几厘米
    *   就撞墙，位移根本到不了 0.25 —— 明明上去了却报失败（用户 2026-11-05「又跳不上去」）。 */
   const ok = up >= 0.75
+  noteHop(ok)
   return {
     tried: true, ok,
     up: Math.round(up * 100) / 100,

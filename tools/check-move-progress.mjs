@@ -4117,6 +4117,20 @@ section('通审：计数、口径、开关、预算')
       && /Math\.ceil\(dS\) \* stepCost \+ 20/.test(mvT)
       && !/Math\.min\(260, Math\.round\(leftSearchMs \/ 1000 \* 26\)\)/.test(mvT),
       '★ A* 搜索预算是「代价」不是「格数」：按一步真实挖价（digUnit×2.6）× 每秒两步算，上限 1200（260 分只够 2.6 步 ⇒ 每趟 noPath）')
+    /* 🟢 用户 2026-11-04：「move 现在就算没有地方落脚也会跳，一直会摔血」+ 柱林里一秒 14 次起跳。
+     *   `stepUp` 原来只判"前面是不是高一格"，从不判落点能不能站 ⇒ 柱状地形里"高一格"永远成立、
+     *   每步都跳，跳空了就是自由落体（实机 18:11:37 `mc_auto：掉血 + 净下落 3.8 格 ⇒ 判成摔伤 … 血 9/20`）。
+     *   两道闸门：①跳之前验落点（脚位空 + 头顶空 + 脚下实心非液体），自己那一列（垫柱档）与
+     *   "要挖穿的厚台阶"（canStandOnTop=false）除外；②同一格 8 秒内连跳 2 次没净升高就放弃这一招。 */
+    ok(/export const MOVE_STEP_UP_REPEAT_MAX = 2/.test(mvT)
+      && /export const MOVE_STEP_UP_REPEAT_MS = 8000/.test(mvT)
+      && /if \(!ownColumn && geo\.canStandOnTop !== false\) \{/.test(mvT)
+      && /why: 'no-land', landing: \{ x: landX, y: landY, z: landZ \}, landedOn/.test(mvT)
+      && /if \(hopFails >= MOVE_STEP_UP_REPEAT_MAX\) \{/.test(mvT)
+      && /why: 'hop-repeat', repeat: hopFails/.test(mvT)
+      && /noteHop\(ok\)/.test(mvT)
+      && (mvT.match(/noteHop\(false\)/g) || []).length === 1,
+      '★ stepUp 两道闸门：跳前验落点（落点站不住就不跳，报 no-land）+ 同一格 8 秒内连跳 2 次没净升高就放弃（报 hop-repeat）')
   }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)
