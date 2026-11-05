@@ -16,7 +16,7 @@ import {
   installRejectionGuard, uninstallRejectionGuard, refreshRejectionGuard, rejectionGuardStats,
   PATH_REJECTION_NAMES, BENIGN_REJECTION_MESSAGE_RES,
 } from '../src/crash-guard.mjs'
-import { guardDigRejections } from '../src/plugins.mjs'
+import { guardDigRejections, guardJumpAudit, jumpAuditLine } from '../src/plugins.mjs'
 
 let pass = 0
 let fail = 0
@@ -238,6 +238,49 @@ section('⑩ 源码：三个挖掘入口开新挖前先自己松手 + 给 raw pr
     '开新挖前都先自己松手（把掐断放进我们的 try 里）',
     String(cnt(mv, 'if (b?.targetDigBlock) { try { b.stopDigging?.() } catch {} ; await sleep(0) }')))
   ok(!/Promise\.resolve\(b\.dig\(blk, true\)\)/.test(mv), '不再有"先 dig 再包 race、迟到拒绝没人接"的旧写法')
+}
+
+section('⑪ 跳跃审计：到底是谁在按 jump（2026-11-04 用户「move 就算没有地方落脚也会跳，一直会摔血」）')
+{
+  ok(typeof guardJumpAudit === 'function', 'plugins.mjs 导出 guardJumpAudit')
+  ok(typeof jumpAuditLine === 'function', 'plugins.mjs 导出 jumpAuditLine（自检/调试用）')
+  const calls = []
+  const lines = []
+  const bot = {
+    entity: { position: { x: 10.4, y: 64, z: -3.2 } },
+    setControlState: (c, s) => { calls.push(`${c}:${s}`) },
+    /* 脚下一格（y=63）是实心 ⇒ 落差 0 */
+    blockAt: (v) => ({ boundingBox: v.y === 63 ? 'block' : 'empty', liquid: false, name: v.y === 63 ? 'stone' : 'air' }),
+  }
+  ok(guardJumpAudit(bot, { log: (m) => lines.push(m) }) === true, '装上了')
+  ok(guardJumpAudit(bot, { log: () => {} }) === false, '重复装返回 false（幂等，不会套两层）')
+  bot.setControlState('jump', true)      // 记
+  bot.setControlState('jump', true)      // 按住，不重复记
+  bot.setControlState('jump', false)
+  bot.setControlState('forward', true)   // 别的键不记
+  bot.setControlState('jump', true)      // 再按一次：记
+  ok(lines.length === 2, '只在「jump 由假变真」那一刻记一次（按住不重复、别的键不记）', String(lines.length))
+  /* 需要时可以用 minGapMs 压噪：同一时间窗里的连按只记一条 */
+  const lazy = []
+  const bot2 = { entity: { position: { x: 0, y: 64, z: 0 } }, setControlState: () => {}, blockAt: () => ({ boundingBox: 'block', liquid: false, name: 'stone' }) }
+  guardJumpAudit(bot2, { log: (m) => lazy.push(m), minGapMs: 5000 })
+  bot2.setControlState('jump', true); bot2.setControlState('jump', false); bot2.setControlState('jump', true)
+  ok(lazy.length === 1, 'minGapMs 能把连按压成一条（默认 0 = 每次都记）', String(lazy.length))
+  ok(calls.length === 5, '原 setControlState 一次不少地照旧被调用（审计只读、不改行为）', JSON.stringify(calls))
+  ok(/🦘 跳 @10,64,-4/.test(lines[0] ?? ''), '第一行带位置（取整到格）', lines[0])
+  ok(/落脚：原地（脚下立刻是实心）/.test(lines[0] ?? ''), '脚下 1 格内就是实心时如实说“原地”', lines[0])
+  ok(/来源：/.test(lines[0] ?? ''), '有“来源”字段（调用栈），能认出是 A\\* 还是我们自己跳的', lines[0])
+  const deep = {
+    entity: { position: { x: 0.5, y: 80, z: 0.5 } },
+    setControlState: () => {},
+    blockAt: (v) => ({ boundingBox: v.y === 74 ? 'block' : 'empty', liquid: false, name: 'stone' }),
+  }
+  ok(/得往下 5 格才有落脚/.test(jumpAuditLine(deep)), '落差按“从脚下往下扫到第一个实心”算（这里 5 格）', jumpAuditLine(deep))
+  const plj = readFileSync(new URL('../src/plugins.mjs', import.meta.url), 'utf8')
+  ok(plj.split('export function guardJumpAudit').length - 1 === 1, 'plugins.mjs 里有 guardJumpAudit 定义')
+  ok(plj.split('guardJumpAudit(b, { log: (m) => self.log(m) })').length - 1 === 1, 'setupPlugins 里真的把它装上了')
+  ok(plj.split('b.setControlState = function (control, state, ...rest)').length - 1 === 1,
+    '包的是 setControlState 实例方法（A\\* 执行动作和我们自己的跳都会经过它）')
 }
 
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} 通过 / ${fail} 失败`)

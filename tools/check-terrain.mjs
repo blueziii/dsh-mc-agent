@@ -465,6 +465,7 @@ section('⑨ 二档补丁：藤蔓能爬、掉进岩浆能规划着游出来')
     constructor (b) {
       this.bot = b
       this.blocksToAvoid = new Set([7])       // 7 = fire（上游默认那批的占位）
+    this.blocksCantBreak = new Set()        // 2026-11-04：岩浆也会进这张名单
       this.climbables = new Set([5])          // 5 = ladder（上游唯一那个）
       this.carpets = new Set()
       this.openable = new Set()
@@ -480,12 +481,29 @@ section('⑨ 二档补丁：藤蔓能爬、掉进岩浆能规划着游出来')
 
   const dry = movements(selfOf(false))
   ok(dry.blocksToAvoid.has(9) === true, '🔴 不在岩浆里 ⇒ 岩浆留在寻路黑名单（照旧绕开）')
+  ok(dry.blocksCantBreak.has(9) === true, '🔴🔴 不在岩浆里 ⇒ 岩浆同时进 blocksCantBreak（A* 才不会规划"挖开岩浆走过去"）')
   ok(dry.__dshInLava === false, '记了"当前不在岩浆里"')
 
   const wet = movements(selfOf(true))
   ok(wet.blocksToAvoid.has(9) === false, '🔴 掉进岩浆 ⇒ 岩浆从黑名单里放出来（A* 才能规划着游出去）')
+  ok(wet.blocksCantBreak.has(9) === false, '🔴 掉进岩浆 ⇒ 也从 blocksCantBreak 里拿出来（不然连"游出去"都不许挖）')
   ok(wet.__dshInLava === true, '记了"当前在岩浆里"')
   ok(wet.liquids?.has?.(9) !== true, '🔴 但**不**把岩浆算成水路（不然平时就往岩浆湖里钻）')
+
+  /* 流动岩浆（老版本里是独立的 `flowing_lava`）也要一起管：两个 id 都得进/出名单。 */
+  const reg2 = { blocksByName: { lava: { id: 9 }, flowing_lava: { id: 10 }, ladder: { id: 5 }, vine: { id: 6 } }, blocksArray: [] }
+  const selfOf2 = (isInLava) => {
+    const b = mkBot(flatScene().w, { x: 0, y: 64, z: 0 })
+    b.registry = reg2
+    b.entity.isInLava = isInLava
+    return { bot: b, cfg: {}, _pf: { Movements: Mv } }
+  }
+  const dry2 = movements(selfOf2(false))
+  ok(dry2.blocksToAvoid.has(9) && dry2.blocksToAvoid.has(10) && dry2.blocksCantBreak.has(9) && dry2.blocksCantBreak.has(10),
+    '🔴 lava 与 flowing_lava 都在两张名单里（流动的那格才是实机踩到的那个）')
+  const wet2 = movements(selfOf2(true))
+  ok(!wet2.blocksToAvoid.has(9) && !wet2.blocksToAvoid.has(10) && !wet2.blocksCantBreak.has(9) && !wet2.blocksCantBreak.has(10),
+    '泡在岩浆里时两张名单都不含岩浆（能规划游出去）')
 
   const mv = new Mv({ registry: reg })
   ok(patchClimbables(mv, { registry: reg }) === 1 && mv.climbables.has(6), '藤蔓进 climbables（vendor 那行是注释掉的）')
@@ -498,8 +516,8 @@ section('⑨ 二档补丁：藤蔓能爬、掉进岩浆能规划着游出来')
   ok(/patchClimbables\(mv, b\)/.test(src), 'movements() 结尾真的调了 patchClimbables')
   /* 🔴 2026-10-27：判据从 `entity.isInLava` 换成 `inLavaNow`（三层兜底）——
    *  断言只验"用当下位置判 + 在岩浆里就放开黑名单"这个语义，别把某一行写法钉死。 */
-  ok(/inLavaNow\(b\)/.test(src) && /if \(inLava\) mv\.blocksToAvoid\.delete\(lavaId\)/.test(src),
-    '岩浆避让按"当下是否在岩浆里"判')
+  ok(/inLavaNow\(b\)/.test(src) && /mv\.blocksToAvoid\.delete\(lavaId\)/.test(src) && /mv\.blocksCantBreak\.delete\(lavaId\)/.test(src),
+    '岩浆避让按"当下是否在岩浆里"判（两张名单一起放）')
 }
 
 console.log('\n' + '─'.repeat(50))

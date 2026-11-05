@@ -412,6 +412,83 @@ export function guardDigRejections (b, { log = null } = {}) {
   return true
 }
 
+/* 🔴 2026-11-04 用户（原文）：「move 现在就算没有地方落脚也会跳，一直会摔血」——
+ *   先查清"到底是谁在按跳跃键"。做法：包一层 `bot.setControlState`，**只在 jump 由假变真那一刻**记一行
+ *   （不每 tick 记 —— 2026-11-02 那次"按键审计每 tick 抓全栈"把主线程拖到 51 次 >80ms，踩过一次）。
+ *   一行里给：位置、脚下落差（往下扫 32 格找第一个实心）、来源（调用栈里第一处 vendor/src 的 文件:行）。
+ *   vendor 那条栈就是 A* 在执行动作（`mineflayer-pathfinder/lib/index.js` 的动作执行器），
+ *   `src/*.mjs` 那条是我们自己的跳（脱困阶梯 / stepUp / place 垫柱）。
+ *   审计只读不改：任何异常都在 try 里吞掉，绝不影响动作本身。
+ */
+export function guardJumpAudit (b, { log = null, minGapMs = 0 } = {}) {
+  if (!b || typeof b.setControlState !== 'function' || b.__dshJumpAudit) return false
+  const orig = b.setControlState.bind(b)
+  let wasJump = false
+  let lastAt = 0
+  b.setControlState = function (control, state, ...rest) {
+    try {
+      if (control === 'jump') {
+        const on = state === true
+        if (on && !wasJump) {
+          const now = Date.now()
+          if (now - lastAt >= minGapMs) {
+            lastAt = now
+            log?.(jumpAuditLine(b))
+          }
+        }
+        wasJump = on
+      }
+    } catch { /* 审计绝不影响动作本身 */ }
+    return orig(control, state, ...rest)
+  }
+  b.__dshJumpAudit = true
+  return true
+}
+
+/** 跳跃审计的一行（导出给自检用）：位置 + 脚下落差 + 来源。 */
+export function jumpAuditLine (b) {
+  const p = b?.entity?.position
+  if (!p) return '🦘 跳（还拿不到位置）'
+  const fx = Math.floor(Number(p.x))
+  const fy = Math.floor(Number(p.y))
+  const fz = Math.floor(Number(p.z))
+  let dropText = '未知'
+  try {
+    for (let i = 1; i <= 32; i++) {
+      const blk = b.blockAt(new Vec3(fx, fy - i, fz))
+      if (!blk) { dropText = `第 ${i} 格未加载`; break }
+      if (blk.boundingBox === 'block' || blk.liquid) {
+        const d = i - 1
+        dropText = d === 0 ? '原地（脚下立刻是实心）' : `得往下 ${d} 格才有落脚`
+        break
+      }
+    }
+  } catch { dropText = '未知' }
+  return `🦘 跳 @${fx},${fy},${fz} ｜ 落脚：${dropText} ｜ 来源：${jumpCallSite()}`
+}
+
+/** 取调用栈里前 3 处"不是本文件"的文件:行，vendor 的缩成 `pf/文件名`。 */
+function jumpCallSite () {
+  try {
+    const lines = String(new Error().stack ?? '').split('\n').slice(1)
+    const out = []
+    for (const raw of lines) {
+      const m = raw.match(/([A-Za-z0-9_\-.]+\.(?:mjs|js|cjs)):(\d+):(\d+)/)
+      if (!m) continue
+      const file = m[1]
+      if (/plugins\.mjs$/.test(file)) continue
+      /* ctrl-audit 是按键审计的包装层：栈里连着三行都是它，真正的调用点还在更上面 */
+      if (/ctrl-audit\.mjs$/.test(file)) continue
+      const short = /mineflayer-pathfinder/.test(file)
+        ? 'pf/' + String(file).split(/[\\/]/).pop()
+        : String(file).split(/[\\/]/).slice(-2).join('/')
+      out.push(`${short}:${m[2]}`)
+      if (out.length >= 4) break
+    }
+    return out.length ? out.join(' ← ') : '未知'
+  } catch { return '未知' }
+}
+
 export async function setupPathfinder (self, { spec = null } = {}) {
   const b = self.bot
   if (!b) return false
@@ -1008,14 +1085,34 @@ export function movements (self, { terrain = null, digFirst = false, allowDig = 
    *    所以掉进去之后下一轮就生效。
    *    ⚠️ 只放 `blocksToAvoid`，不往 `mv.liquids` 里加 lava —— 那等于告诉 A*
    *    "岩浆湖是水下通道"，平时就会规划着往里钻。 */
-  const lavaId = b?.registry?.blocksByName?.lava?.id
-  if (typeof lavaId === 'number') {
+  const lavaIds = []
+  for (const nm of ['lava', 'flowing_lava']) {
+    const id = b?.registry?.blocksByName?.[nm]?.id
+    if (typeof id === 'number' && !lavaIds.includes(id)) lavaIds.push(id)
+  }
+  if (lavaIds.length) {
     /* 🔴 2026-10-27：判据从 `entity.isInLava` 换成 `inLavaNow`（照 `inWaterNow` 的三层兜底）——
      *    浮在岩浆表面时 `entity.isInLava` 可能读不到，于是 lava 留在黑名单里，A* 连"游出去"都规划不出来。 */
     let inLava = false
     try { inLava = inLavaNow(b) } catch { /* 假 bot 没有 entity */ }
-    if (inLava) mv.blocksToAvoid.delete(lavaId)
-    else mv.blocksToAvoid.add(lavaId)
+    for (const lavaId of lavaIds) {
+      if (inLava) {
+        mv.blocksToAvoid.delete(lavaId)
+        /* 🔴 2026-11-04 DSH 补丁（用户：「move 会往流动的岩浆里走」；实机 20:02:41 / 20:10:20 两次
+         *   `lavaEscape`：血 13.2→9.1、14→10.7）—— 只放进 `blocksToAvoid` **拦不住**：
+         *   那个名单只让 `b.safe` 变 false（`movements.js:237`），而 `safeOrBreak()` 拿到 safe=false
+         *   之后还要问 `safeToBreak()` —— 岩浆是"可挖方块"（不在 `blocksCantBreak` 里），于是
+         *   `getMoveForward` 把"走进岩浆"当成一条 **挖开岩浆再走进去** 的边：
+         *   `movements.js:432` 因为 `replaceables.has(lava)` 直接跳过检查，`:449` 的 `safeOrBreak(blockC)`
+         *   只按 laborCost 加了几分（岩浆 digTime ≈ 0）⇒ A* 眼里比绕路便宜得多。
+         *   放进 `blocksCantBreak` ⇒ 那条边算成 Infinity ⇒ **规划阶段就穿不过岩浆格**，
+         *   执行阶段也就不会"先挖岩浆、再一脚踩进去"。 */
+        mv.blocksCantBreak.delete(lavaId)
+      } else {
+        mv.blocksToAvoid.add(lavaId)
+        mv.blocksCantBreak.add(lavaId)
+      }
+    }
     mv.__dshInLava = inLava
   }
 /* 2026-10-29 用户：“耕地 / 土径这两个去掉” —— 原来把 farmland / dirt_path
@@ -1173,6 +1270,8 @@ export async function setupPlugins (self, { spec = null } = {}) {
   guardDoorDig(b, { log: (m) => self.log(m) })
   /* issue #5：bot.dig 的拒绝一律"已处理"，别让 `Digging aborted` 冒到进程级 */
   guardDigRejections(b, { log: (m) => self.log(m) })
+  /* 跳跃审计（2026-11-04 用户：「move 就算没有地方落脚也会跳」）：只记日志，不改行为 */
+  guardJumpAudit(b, { log: (m) => self.log(m) })
   const mv = self.pfReady ? movements(self) : null
 
   // ① 走过去挖方块 / 捡掉落物（内部自己用 mineflayer-tool 换工具）
