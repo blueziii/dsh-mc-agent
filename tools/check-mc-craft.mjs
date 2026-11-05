@@ -1106,7 +1106,19 @@ console.log('— ⑦ 依赖树 tree —')
   ok(/tree: \{ type: 'boolean'/.test(src), '参数表里有 tree')
   ok(/goalTree\(bot, args\.name, args\.count, \{ table: allowTable \}\)/.test(src), 'execute 里接上了 goalTree')
   ok(/from '\.\/mc_furnace\.mjs'/.test(src), '烧炼表复用 mc_furnace（没抄第二份）')
+}/* 🔴 2026-11-05 issue #6 ③④：
+ *   ③ 需要工作台的合成"一律报缺料" —— 多半是桌子在 5~32 格外（findTableBlock 只看 4 格）；
+ *   ④ 做完只报"完成"，数量不够时看不出是缺料还是没做够。 */
+{
+  const src = readFileSync(new URL('../extensions/mc_craft.mjs', import.meta.url), 'utf8')
+  ok(/listTablesNearby\(bot, Math\.max\(8, probeR\), 1\)/.test(src), '需要工作台而身边没有时，先按更大半径找最近的桌子')
+  ok(/const mv2 = await mc\.walkTo\(at, \{ arrive: 2\.2/.test(src), '找到了就替模型走过去（和 mc_chest / mc_furnace 同一口径）')
+  ok(/plan = planCraft\(bot, target\.item\.id, want, table\)/.test(src), '走到桌子旁边后用这张桌子重新规划（不是只改一行文案）')
+  ok(!/placeBlock\(/.test(src), '仍然**不替你放**工作台（用户 2026-10-19 定）')
+  ok(/还差 \$\{left\} 个/.test(src), '做出来不够时把差额摊开说：还差几个 + 为什么（缺哪种料 / 还是料够只要再叫一次）')
+  ok(/hint = p2\.ok \? '料是够的：再叫一次 mc_craft 接着做/.test(src), '料够而没做够时明确说「再叫一次就行，别改 count」（治 count 不生效的误解）')
 }
+
 
 console.log('')
 console.log(`check-mc-craft：pass=${pass} fail=${fail}`)

@@ -269,7 +269,7 @@ export async function connect (self, opts = {}, ctx = {}) {
          *    走的是 'error' 事件**，没人接，于是只能干等到 connectTimeoutMs（原来是 45 秒）。
          *    现在 error / end 都立刻失败，并把常见 errno 翻成人话。 */
         let settled = false
-        const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(t); fn(v) }
+        const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(t); clearTimeout(tRespawn); fn(v) }
         const humanize = (e) => {
           const code = String(e?.code ?? e?.errno ?? '').toUpperCase()
           const msg = String(e?.message ?? e ?? '')
@@ -280,7 +280,23 @@ export async function connect (self, opts = {}, ctx = {}) {
           if (/version|protocol/i.test(msg)) return `协议版本对不上：${msg.slice(0, 120)}`
           return `${msg.slice(0, 160)}${code ? `（${code}）` : ''}`
         }
+        /* 兜底要**早于** connectTimeoutMs 触发，否则永远等不到；也不能太急（正常进服 1~3 秒）。 */
+        const respawnMs = Math.max(3_000, Math.min(8_000, Math.round((Number(self.cfg.connectTimeoutMs) || 20_000) - 2_000)))
         const t = setTimeout(() => done(reject, new Error(`连接 ${sub} 超时（${Math.round((Number(self.cfg.connectTimeoutMs) || 0) / 1000)} 秒没握手成功）`)), self.cfg.connectTimeoutMs)
+        /* 🔴 2026-11-05 issue #6 ②：上次**死在游戏里**直接断线 ⇒ playerdata 里 Health:0 +
+         *    DeathTime≠0 ⇒ 服务端把玩家摆进死亡界面、**就是不发 spawn 包** ⇒ 我们干等到
+         *    connectTimeoutMs（默认 45s）才报“超时”，看着像服务器坏了（换名字秒进、用回原名必卡）。
+         *    这里等 spawn 等太久就主动发一次重生请求：活人无害（多发一个 client_command 包），
+         *    死着下线的存档能立刻进世界。只发一次，且只在这条连接还活着时发。 */
+        let respawned = false
+        const tRespawn = setTimeout(() => {
+          if (settled || respawned || self.bot !== b) return
+          respawned = true
+          try {
+            self.log('连接 ' + Math.round(respawnMs / 1000) + ' 秒还没进世界（多半上次是“死着下线”，服务端停在死亡界面不发 spawn）—— 主动发一次重生请求')
+            b.respawn?.()
+          } catch (e) { try { self.log('主动重生失败：' + (e?.message ?? e)) } catch { /* 记不上不影响连接 */ } }
+        }, respawnMs)
         b.once('spawn', () => done(resolve))
         b.once('kicked', (r) => done(reject, new Error(`被踢: ${String(r).slice(0, 200)}`)))
         b.once('error', (e) => done(reject, new Error(`连不上 ${sub}：${humanize(e)}`)))

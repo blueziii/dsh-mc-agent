@@ -1624,5 +1624,14 @@ ok(/chaseResets >= 3 && dd > 4\.0/.test(atkSrc2) && /await ctx\.moveTo\(pt, \{ a
  * 用行为用例只会写出"恰好今天能过"的断言 ⇒ 这里只钉源码契约（上面那几条）。
  * 真机表现靠 chaseResets 字段 + 追不上的 note 自查。 */
 
+/* 🔴 2026-11-05 issue #6 ①：实机"拿着面包 / 圆石砍了 13 刀"（骷髅只掉 17.8 血）。
+ *    开打前确实关了自动吃、也换过武器，但每刀之间不校验手持 ⇒ 换手一次，后面几十刀全白砍。 */
+{
+  const src = readFileSync(new URL('../src/attack.mjs', import.meta.url), 'utf8')
+  ok((src.match(/const ensureHold = async \(\) => \{/g) || []).length === 2, '两个挥砍分支（pvp / 手动）各有一道「每刀校验手持」的守卫')
+  ok((src.match(/if \(!\(await ensureHold\(\)\)\) break/g) || []).length === 2, '两处挥砍前都先校验手持，换不回来就收手（不再白砍）')
+  ok(/weaponSwapped/.test(src) && /weaponWarn: weaponLost/.test(src), '换过几次手、手里被换成了什么都进结果（不再静静白砍）')
+  ok(/if \(wantHeld == null\) return true/.test(src), '空手开打时不拦（wantHeld 为 null ⇒ 守卫是空操作，不改变原有行为）')
+}
 console.log(`\ncheck-core-attack：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

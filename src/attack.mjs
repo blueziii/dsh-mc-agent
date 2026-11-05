@@ -400,6 +400,24 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
 
   const engagePvp = async (opts = {}) => {
     const ae = eatOff()
+    /* 🔴 2026-11-05 issue #6 ①：实机出现“拿着面包 / 圆石砍了 13 刀”（骷髅只掉 17.8 血，
+     *    铁剑本该 78）—— 开打前我们确实关掉了自动吃、也换过武器，但**每一刀之间没人再看一眼手上是什么**，
+     *    换手只要发生一次，后面几十刀全打白，而结果里写的是 “attacked: skeleton”。
+     *    这里每挥一刀前核对：不一致就换回来；换不回来就收手，并把这件事写进结果（weaponWarn）。 */
+    const wantHeld = b.heldItem?.name ?? null
+    let weaponSwapped = 0
+    let weaponLost = null
+    const ensureHold = async () => {
+      if (wantHeld == null) return true
+      if ((b.heldItem?.name ?? null) === wantHeld) return true
+      weaponSwapped++
+      if (typeof ctx.equipTo === 'function' && weaponSwapped <= 3) {
+        try { await ctx.equipTo(wantHeld) } catch { /* 换不回来下面统一报 */ }
+        if ((b.heldItem?.name ?? null) === wantHeld) return true
+      }
+      weaponLost = weaponLost ?? ('挥刀期间手里被换成了 ' + (b.heldItem?.name ?? '空手') + '（原本 ' + wantHeld + '）—— 这一刀下去不算数')
+      return false
+    }
     /* 🔴 `bot.pvp.attack(target)` **立刻** resolve（它只做三件事：设 target、`GoalFollow` 追过去、
      *    发 `startedAttacking` 事件），真正挥拳的是 `physicTick` 上的后台循环 ⇒
      *    旧写法 `await withTimeout(b.pvp.attack(...))` 一毫秒就返回，紧接着 `finally` 里
@@ -566,6 +584,8 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
               const eh = Number(target.height) > 0 ? Number(target.height) : 1.8
               await b.lookAt(target.position.offset(0, Math.min(1.3, eh * 0.5), 0))
             } catch { /* 看不过去也照打，别因为转头失败就不出手 */ }
+            /* 手上不是开打那把武器（被自动吃 / 别的异步流程换掉了）⇒ 先换回来，换不回来就收手。 */
+            if (!(await ensureHold())) break
             /* 走 `ctx.t` 的预算闸门（与 `engageSwing` 同一个口径）：发包要记账，预算见底时它会抛。 */
             try {
               await ctx.t(Promise.resolve(b.attack(target)), 'attack', `攻击 ${label}`)
@@ -662,6 +682,8 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
       ...(pickup ? { pickup } : {}),
       ...(drops.length ? { drops } : {}),
       ...(pvpErr ? { error: pvpErr } : {}),
+      ...(weaponSwapped ? { weaponSwapped } : {}),
+      ...(weaponLost ? { weaponWarn: weaponLost } : {}),
       ...(shields ? { shieldBlocks: shields } : {}),
       /* 内部字段（下划线开头，不进最终返回值）：给策略层判断用 */
       _sawDamage: sawDamage, _inRange: inRange, _gone: gone, _killed: killed,
@@ -672,6 +694,24 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
   /** 没有 pvp 插件：退化成原地挥（上游原版就是一次 `b.attack`，这里按预算多挥几下） */
   const engageSwing = async () => {
     const ae = eatOff()
+    /* 🔴 2026-11-05 issue #6 ①：实机出现“拿着面包 / 圆石砍了 13 刀”（骷髅只掉 17.8 血，
+     *    铁剑本该 78）—— 开打前我们确实关掉了自动吃、也换过武器，但**每一刀之间没人再看一眼手上是什么**，
+     *    换手只要发生一次，后面几十刀全打白，而结果里写的是 “attacked: skeleton”。
+     *    这里每挥一刀前核对：不一致就换回来；换不回来就收手，并把这件事写进结果（weaponWarn）。 */
+    const wantHeld = b.heldItem?.name ?? null
+    let weaponSwapped = 0
+    let weaponLost = null
+    const ensureHold = async () => {
+      if (wantHeld == null) return true
+      if ((b.heldItem?.name ?? null) === wantHeld) return true
+      weaponSwapped++
+      if (typeof ctx.equipTo === 'function' && weaponSwapped <= 3) {
+        try { await ctx.equipTo(wantHeld) } catch { /* 换不回来下面统一报 */ }
+        if ((b.heldItem?.name ?? null) === wantHeld) return true
+      }
+      weaponLost = weaponLost ?? ('挥刀期间手里被换成了 ' + (b.heldItem?.name ?? '空手') + '（原本 ' + wantHeld + '）—— 这一刀下去不算数')
+      return false
+    }
     const hpStart = Number(b.health)
     const t0 = Date.now()
     const leftMs2 = ctx.callLeft() - 400
@@ -717,6 +757,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
           await b.lookAt(target.position.offset(0, Math.min(1.3, eh * 0.5), 0))
         } catch { /* 看不过去也照打，别因为转头失败就不出手 */ }
       }
+      if (!(await ensureHold())) break
       await ctx.t(Promise.resolve(b.attack(target)), 'attack', `攻击 ${label}`)
       swings++
       swing = swingCooldownMsOf(b)
@@ -728,7 +769,7 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
       }
     }
     // 没有 pvp 时至少挥一下（bd=0 说明这一轮已经用完了，那就别再拖）
-    if (swings === 0 && b.entities?.[target.id] && target.isValid !== false && distOf(target) <= ATTACK_REACH && !ctx.abortSignal?.aborted) {
+    if (swings === 0 && b.entities?.[target.id] && target.isValid !== false && distOf(target) <= ATTACK_REACH && !ctx.abortSignal?.aborted && (await ensureHold())) {
       try { await ctx.t(Promise.resolve(b.attack(target)), 'attack', `攻击 ${label}`); swings = 1 } catch {}
       await sleep(200)
       sample()
@@ -749,9 +790,12 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
     if (gone && !killed) notes.push('目标不见了，但**没读到过它掉血** —— 说不清是我打死的还是它走远/区块卸载了（别当成打死了）')
     if (losBlocked) notes.push(`眼睛到「${label}」之间隔着 **${losBlocked.blocker}**（${losBlocked.at.x},${losBlocked.at.y},${losBlocked.at.z}）—— 这一轮一下都没挥（挥了也是空）；先挖开它，或者换个能看见目标的身位`)
     if (hardHurt) notes.push(`这一轮挨了 ${(hpStart - Number(b.health)).toFixed(0)} 点伤害 —— 血掉太快，提前收手`)
+    if (weaponLost) notes.push(weaponLost + '（先 `mc_inventory` 看看吃的还在不在，再叫一次攻击）')
     const nowDist = distOf(target)
     return {
       attacked: label, distance: Number(nowDist.toFixed(1)), swings, killed, gone, health: b.health,
+      ...(weaponSwapped ? { weaponSwapped } : {}),
+      ...(weaponLost ? { weaponWarn: weaponLost } : {}),
       ...(losBlocked ? { losBlocked: { x: losBlocked.at.x, y: losBlocked.at.y, z: losBlocked.at.z, name: losBlocked.blocker } } : {}),
       ...(notes.length ? { note: notes.join('；') } : {}),
       ...(standMode

@@ -1266,6 +1266,35 @@ export async function apply (api) {
       if (target.note) head.push(`　${target.note}`)
       if (table) head.push(`　🔨 工作台：(${table.position.x},${table.position.y},${table.position.z})`)
 
+      /* 🔴 2026-11-05 issue #6 ③：需要工作台的合成都报“缺料” —— 绝大多数不是缺料，
+       *    而是工作台在 5~32 格外：`findTableBlock` 只看身边 4 格，plan 于是判“缺桌子”，
+       *    而它长得跟“缺料”一模一样，模型只能一遍遍重试同一个调用。
+       *    这里替模型走过去（`mc_chest` / `mc_furnace` 一直是这个口径），走过去重新规划；
+       *    走不到才如实报。**仍然不替你放桌子**（用户 2026-10-19 定）。 */
+      if (!table && allowTable && args.x == null && plan.steps.some((st) => st.table)) {
+        const probeR = clamp(Math.round(Number(args.radius) || 16), 4, 32)
+        const cand = (() => { try { return listTablesNearby(bot, Math.max(8, probeR), 1)[0] ?? null } catch { return null } })()
+        if (cand) {
+          const at = { x: cand.x, y: cand.y, z: cand.z }
+          try {
+            const leftWalk = Number(mc.msLeft?.() ?? 15_000)
+            const mv2 = await mc.walkTo(at, { arrive: 2.2, budget: Math.min(15_000, Math.max(2_000, leftWalk)) })
+            const t2 = (() => { try { return findTableBlock(bot, { ...at, radius: 3 }) } catch { return null } })()
+            if (t2) {
+              table = t2
+              plan = planCraft(bot, target.item.id, want, table)
+              head.push(`　🔨 工作台在 ${cand.distance} 格外（${at.x},${at.y},${at.z}）—— 我已经走过去用它的 3×3`)
+            } else {
+              head.push(`　🔨 走到 (${at.x},${at.y},${at.z}) 附近了，但没读到那张工作台（${mv2?.reason ?? '走不到'}）`)
+            }
+          } catch (e) {
+            head.push(`　🔨 想走过去用工作台 (${at.x},${at.y},${at.z}) 但没走成：${String(e?.message ?? e).slice(0, 80)}`)
+          }
+        } else if (probeR < 32) {
+          head.push(`　🔨 身边 ${probeR} 格里没有工作台（要更远的话加 \`radius:32\`）`)
+        }
+      }
+
       if (!plan.ok) {
         const text = [...head, describeMissing(plan, bot)].filter(Boolean).join('\n')
         logLine(`mc_craft：${target.item.name} ×${want} 缺料（${plan.missing.map((m) => m.name).join(',')}）`)
@@ -1368,6 +1397,19 @@ export async function apply (api) {
           + `（或者 count 直接写 ${got + wantN}）`)
       } else {
         lines.push(`✅ 合成完成（${(ms / 1000).toFixed(1)}s）：${done.map((d) => `${d.name} ×${d.got}`).join('、')}`)
+        /* 🔴 2026-11-05 issue #6 ④（“`count` 没生效，一次只做 1 个”）：做完就报“完成”，
+         *    数量不够时模型不知道是“料只够这么多”还是“我没做够”。这里把差额摊开说清楚：
+         *    还差几个、差的是哪样料、现有几个 —— 它照着补料或直接再叫一次。 */
+        if (got < want) {
+          const left = want - got
+          lines.push(`　⚠️ 还差 ${left} 个（要到 ${want} 个，现在 ${got} 个）—— 下面这句是“为什么没做够”：`)
+          let hint = null
+          try {
+            const p2 = planCraft(bot, target.item.id, want, table)
+            hint = p2.ok ? '料是够的：再叫一次 mc_craft 接着做（一次调用做不完就多叫一次，别改 count）' : describeMissing(p2, bot)
+          } catch (e) { hint = `重新规划时出错：${String(e?.message ?? e).slice(0, 80)}` }
+          lines.push('　' + String(hint).split('\n').join('\n　'))
+        }
       }
       lines.push(`　背包里现在有 **${target.item.name} ×${got}**`)
       /* 🔴 对账：计划说做了几个 vs 背包真的多了几个。对不上就是"掉地上了"（或卡在合成格里）。 */

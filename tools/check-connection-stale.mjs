@@ -177,5 +177,15 @@ section('④ 接线：记包 / 清定时器')
   ok(/unref\?\.\(\)/.test(src), '定时器 unref（不让它吊住宿主进程）')
 }
 
+/* 🔴 2026-11-05 issue #6 ②：上次**死在游戏里**直接断线 ⇒ playerdata 里 Health:0 ⇒ 服务端停在死亡界面、
+ *    **不发 spawn 包** ⇒ 我们干等到 connectTimeoutMs（45s）才报"超时"，换名字秒进、用回原名必卡。
+ *    修法是等 spawn 等太久就主动补发一次重生。 */
+{
+  const src = readFileSync(new URL('../src/connection.mjs', import.meta.url), 'utf8')
+  ok(/const respawnMs = Math\.max\(3_000, Math\.min\(8_000/.test(src), '兜底重生提前到 3~8 秒触发（一定早于 connectTimeoutMs 的超时）')
+  ok(/b\.respawn\?\.\(\)/.test(src), '等不到 spawn 就主动补发一次重生请求（死着下线的存档能立刻进世界）')
+  ok(/if \(settled \|\| respawned \|\| self\.bot !== b\) return/.test(src), '兜底只发一次，且只在这条连接还活着时发（别去捅新连接）')
+  ok(/clearTimeout\(tRespawn\)/.test(src), 'spawn 一到就清掉兜底定时器（正常连接不会被补发重生）')
+}
 console.log(`\ncheck-connection-stale：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)
