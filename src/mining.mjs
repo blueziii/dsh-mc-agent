@@ -589,10 +589,27 @@ export async function digStair (self, {
       if (!spot) return false
       const restH = budgetMs - (Date.now() - t0) - 1_500
       if (restH < 1_000) return false
-      notes.push(`🧭 ${whyText} —— 沿 ${dirNameOf(d)} 走到 ${spot.pos.x},${spot.pos.y},${spot.pos.z}（${spot.r} 格外，那边朝 ${dirNameOf(d)} 有墙）再接着挖`)
+      /* 🔴 2026-11-04 用户：「现在自动靠近墙壁不管脚下是不是空的」——
+       *   走过去之前先把"这一路脚下有没有地板"逐格验一遍，只走到**连续站得住**的最后一列。
+       *   原来直接把 spot 丢给 `walkTo`，而 A* 允许 2~3 格落差 ⇒ 它会规划一条"从我刚挖出来的
+       *   竖井/坑口上掉下去"的路：人一边靠近墙一边往下掉，白掉高度还可能摔血。
+       *   跨空档就不走（如实说清），留给下一轮从这儿继续挖。 */
+      let reach = 0
+      for (let r = 1; r <= spot.r; r++) {
+        if (!standOkAt(cur.x + d.x * r, cur.y, cur.z + d.z * r)) break
+        reach = r
+      }
+      if (reach < 1) {
+        notes.push(`⛔ 沿 ${dirNameOf(d)} 走过去要先跨空档（${cur.x + d.x},${cur.y},${cur.z + d.z} 脚下没地板）—— 不硬走，先在这一侧挖出落脚面`)
+        return false
+      }
+      const aim = { x: cur.x + d.x * reach, y: cur.y, z: cur.z + d.z * reach }
+      notes.push(reach < spot.r
+        ? `🧭 ${whyText} —— 沿 ${dirNameOf(d)} 走到 ${aim.x},${aim.y},${aim.z}（先走这 ${reach} 格；再往前 ${spot.r - reach} 格脚下是空的，不走）再接着挖`
+        : `🧭 ${whyText} —— 沿 ${dirNameOf(d)} 走到 ${aim.x},${aim.y},${aim.z}（${spot.r} 格外，那边朝 ${dirNameOf(d)} 有墙）再接着挖`)
       try {
         const w2 = await self.walkTo(
-          { x: spot.pos.x, y: spot.pos.y, z: spot.pos.z },
+          { x: aim.x, y: aim.y, z: aim.z },
           { allowDig: false, budget: Math.min(3_000, restH), intent: 'stand' },
         )
         if (w2?.arrived !== true) notes.push(`⚠ 没走到那格：${w2?.hint ?? w2?.reason ?? '没给原因'}`)
@@ -612,6 +629,12 @@ export async function digStair (self, {
       for (let r = 1; r <= WALL_SCAN_AHEAD; r++) {
         const x = cur.x + d.x * r
         const z = cur.z + d.z * r
+        /* 同上一条（用户：「靠近墙壁不管脚下是不是空的」）：脚下没地板的那一列**就是断点**，
+         *   不许跳过去看更远的列 —— 走过去必定掉进自己挖的坑。 */
+        if (!standOkAt(x, cur.y, z)) {
+          notes.push(`⛔ 沿 ${dirNameOf(d)} 第 ${r} 格（${x},${cur.y},${z}）站不住 —— 不再往前找，先在这一侧挖`)
+          return false
+        }
         const under = blkAt(x, cur.y - 1, z)
         if (!under || isAir(under.name) || isLiquid(under.name)) continue
         notes.push(`🧱 沿 ${dirNameOf(d)} 这一层没有现成的墙 —— 先往前走到 ${x},${cur.y},${z}（那边脚下有地板），从那里再起台阶`)
@@ -777,11 +800,23 @@ export async function digStair (self, {
      *   没人看（失败也不说为什么），日志里只剩下“一步都没走动”。
      *   现在：先 bit 直接跳（stepUp 约 0.6 秒，比 A* 便宜），成功就走下一步；
      *   不行再让 A* 试，再不行最后再跳两次（用户实测第二下常常就上去了）。 */
+    /* 🔴 2026-11-04 用户：「每次挖完为什么要跳一下」——
+     *   这一跳本来是"先跳（约 0.6 秒）→ 不成再让 A* 试（1.5~3 秒）→ 再跳两次"里的第一跳，
+     *   图的是便宜。但它**只有在人已经站在台阶跟前**（水平 ≤1.1 格）时才够得着斜上一格；
+     *   离得远就跳 = 空中只挪 0.4~0.6 格，落点偏到斜邻格（实机 18 次「↪ 跳上去了但没落到」），
+     *   白跳一次还要再走一遍 A*。所以先量距离：远的时候先走过去，下一轮再跳。 */
+    const hopDx = Number(b?.entity?.position?.x ?? cur.x) - (fx + 0.5)
+    const hopDz = Number(b?.entity?.position?.z ?? cur.z) - (fz + 0.5)
+    const hdHop = Math.hypot(hopDx, hopDz)
+    const canQuickHop = hdHop <= 1.1
+    if (!canQuickHop) {
+      notes.push(`🚶 离台阶还有 ${hdHop.toFixed(1)} 格 —— 先走过去再跳（在空中干跳只会落偏到旁边一格）`)
+    }
     let hopWhy = null
     let hopped = false
     {
       const mv0 = await import('./movement.mjs').catch(() => null)
-      if (mv0?.stepUp) {
+      if (canQuickHop && mv0?.stepUp) {
         try {
           const su0 = await mv0.stepUp(b, new Vec3(fx, standY, fz), { allowDig: false })
           hopped = su0?.ok === true
